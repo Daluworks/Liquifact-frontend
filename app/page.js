@@ -1,17 +1,63 @@
 "use client";
 
 import Link from "next/link";
-import { useRef, useState, useEffect } from "react";
+import { useCallback, useRef, useState, useEffect } from "react";
 import NavMenu from "../components/NavMenu";
 import { copy } from "./copy/en";
 import { getHealth } from "../lib/api/health";
 import { env } from "../lib/config/env";
-import { extractKnownFields, safeJsonStringify } from "../lib/format/safeJson";
+import { extractKnownFields, safeJsonStringify, truncateString } from "../lib/format/safeJson";
 
 const API_URL = env.apiUrl;
 
-// Status mapping to visual states
-// Maps getHealth return values to badge styles and labels
+/**
+ * Exhaustive allowlist of status values returned by getHealth.
+ *
+ * Any status value NOT in this set is treated as 'unreachable' before it is
+ * stored in state or rendered. This prevents attacker-controlled status strings
+ * from leaking into the aria-live region, badge label, or structured summary.
+ *
+ * @type {ReadonlySet<string>}
+ */
+const STATUS_ALLOWLIST = Object.freeze(new Set(["connected", "degraded", "unreachable"]));
+
+/**
+ * Maximum character length for health.message rendered in the aria-live region.
+ * Caps an unusually long server-controlled string to prevent layout abuse.
+ */
+const MESSAGE_MAX_LEN = 300;
+
+/**
+ * Maximum character length for individual field values in the structured summary.
+ * Each value is rendered via truncateString so the DOM cannot be flooded with
+ * a giant server-supplied string.
+ */
+const FIELD_VALUE_MAX_LEN = 200;
+
+/**
+ * Normalises a raw status value from getHealth to one of the three known states.
+ * Any unrecognised value maps to "unreachable" — the safest, most visible fallback.
+ *
+ * ## Why normalise here rather than in getStatusConfig?
+ * Normalising at the point of state storage (inside checkApi) means that
+ * `health.status` in component state is always a member of STATUS_ALLOWLIST.
+ * Downstream consumers — badge, aria-live region, structured summary — never
+ * see an attacker-controlled string, so there is a single enforcement point
+ * rather than defensive checks scattered across the render tree.
+ *
+ * @param {unknown} status - Raw status from the API response.
+ * @returns {"connected" | "degraded" | "unreachable"}
+ */
+export function normalizeStatus(status) {
+  if (typeof status === "string" && STATUS_ALLOWLIST.has(status)) {
+    return status;
+  }
+  return "unreachable";
+}
+
+// Status mapping to visual states.
+// Maps normalised getHealth return values to badge styles and labels.
+// All inputs are guaranteed to be in STATUS_ALLOWLIST at this point.
 const getStatusConfig = (status) => {
   switch (status) {
     case "connected":
@@ -27,19 +73,41 @@ const getStatusConfig = (status) => {
         icon: "⚠",
       };
     case "unreachable":
+    default:
       return {
         label: copy.home.healthStatus.unreachable,
         badgeClass: "bg-red-500/10 text-red-400 border-red-500/20",
         icon: "✕",
       };
-    default:
-      return {
-        label: status,
-        badgeClass: "bg-slate-500/10 text-slate-400 border-slate-500/20",
-        icon: "?",
-      };
   }
 };
+
+/**
+ * Sanitises a health result object before it is placed into component state.
+ *
+ * Invariants enforced:
+ *  - `status` is normalised to STATUS_ALLOWLIST (unknown → "unreachable").
+ *  - `message` is capped at MESSAGE_MAX_LEN characters.
+ *  - All other fields are forwarded as-is (safeJsonStringify bounds the raw
+ *    payload in the collapsible section; extractKnownFields + truncateString
+ *    bound individual field values in the structured summary).
+ *
+ * @param {object} result - Raw result from getHealth.
+ * @returns {object} Sanitised result safe for storage and rendering.
+ */
+export function sanitizeHealthResult(result) {
+  if (!result || typeof result !== "object") {
+    return { status: "unreachable", message: "Invalid response received." };
+  }
+
+  const status = normalizeStatus(result.status);
+  const message =
+    typeof result.message === "string"
+      ? truncateString(result.message, MESSAGE_MAX_LEN)
+      : "";
+
+  return { ...result, status, message };
+}
 
 export default function Home() {
   const [health, setHealth] = useState(null);
@@ -52,7 +120,33 @@ export default function Home() {
     };
   }, []);
 
-  const checkApi = async () => {
+  /**
+   * Initiates a health-check request.
+   *
+   * ## Concurrent-execution guard
+   * `loading` is checked at the top of the callback: if a check is already
+   * in-flight, the call is a no-op. This prevents double-submission if
+   * `checkApi` is called programmatically while the button is already disabled
+   * (e.g., via keyboard events that bypass the `disabled` attribute, automation
+   * scripts, or React testing utilities that fire events programmatically).
+   *
+   * The AbortController pattern ensures that:
+   *  1. A previous in-flight request is aborted before a new one starts.
+   *  2. The component-unmount cleanup aborts any pending request.
+   *  3. An AbortError is silently swallowed so it does not surface as an error.
+   *
+   * ## Validation boundary
+   * The raw result from `getHealth` is passed through `sanitizeHealthResult`
+   * before being stored in state. This ensures:
+   *  - `status` is always one of ["connected", "degraded", "unreachable"].
+   *  - `message` is capped at MESSAGE_MAX_LEN characters.
+   *
+   * @returns {Promise<void>}
+   */
+  const checkApi = useCallback(async () => {
+    // Reentrance guard: a check is already running — ignore this call.
+    if (loading) return;
+
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -61,7 +155,10 @@ export default function Home() {
     try {
       const result = await getHealth(API_URL, { signal: controller.signal });
       if (controller.signal.aborted) return;
-      setHealth(result);
+
+      // Validation boundary: normalise status and cap message length before
+      // storing in state so the render tree never sees attacker-controlled values.
+      setHealth(sanitizeHealthResult(result));
     } catch (err) {
       if (err?.name === "AbortError") return;
     } finally {
@@ -69,7 +166,7 @@ export default function Home() {
         setLoading(false);
       }
     }
-  };
+  }, [loading]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -123,7 +220,8 @@ export default function Home() {
                 className="rounded-lg border border-slate-700 bg-slate-800/50 p-4"
               >
                 <div className="flex items-center gap-3 mb-3">
-                  {/* Color-coded badge with icon and text - not color-only for accessibility */}
+                  {/* Color-coded badge with icon and text — not color-only for accessibility.
+                      health.status is always a STATUS_ALLOWLIST member at this point. */}
                   <span
                     className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border ${getStatusConfig(health.status).badgeClass}`}
                   >
@@ -132,18 +230,23 @@ export default function Home() {
                   </span>
                 </div>
 
-                {/* Structured summary for recognized fields */}
+                {/* Structured summary for recognised fields.
+                    Field values are capped at FIELD_VALUE_MAX_LEN characters to prevent
+                    an oversized server-supplied string from flooding the DOM. */}
                 <div className="text-xs text-slate-300 space-y-1 mb-3">
                   {Object.entries(extractKnownFields(health.details || health)).map(
                     ([key, value]) => (
                       <div key={key}>
                         <span className="text-slate-500 font-semibold">{key}:</span>{" "}
-                        <span className="text-slate-300">{String(value)}</span>
+                        <span className="text-slate-300">
+                          {truncateString(String(value), FIELD_VALUE_MAX_LEN)}
+                        </span>
                       </div>
                     )
                   )}
                 </div>
 
+                {/* health.message is already capped at MESSAGE_MAX_LEN by sanitizeHealthResult. */}
                 <p className="text-sm text-slate-300">{health.message}</p>
 
                 {/* Raw response — always shown behind an expandable section */}
