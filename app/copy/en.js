@@ -1,3 +1,5 @@
+import { TRUSTED_WALLET_INSTALL_URL } from "./constants";
+
 /**
  * @typedef {Object} CopyDictionary
  * @property {Object} home - Home page copy
@@ -661,7 +663,7 @@ export const copy = {
     helperInvalidProvider:
       "The detected wallet provider could not be verified. Reinstall the Freighter extension and reload.",
     helperNoWallet: "No Stellar wallet detected. Install one to continue",
-    installWalletUrl: "https://www.stellar.org/wallets",
+    installWalletUrl: TRUSTED_WALLET_INSTALL_URL,
     toastConnectedTitle: "Wallet connected",
     toastConnectedMsg: "Wallet connected successfully.",
     toastErrorTitle: "Connection failed",

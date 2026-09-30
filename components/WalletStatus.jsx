@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useContext } from "react";
 import Button from "./Button";
 import { copy } from "../app/copy/en";
+import { TRUSTED_WALLET_INSTALL_URL } from "../app/copy/constants";
 import { WalletContext, WALLET_STATES, truncateAddress } from "./WalletProvider";
 import { useToast } from "./ToastProvider";
 import { copyToClipboard } from "../lib/clipboard";
@@ -232,14 +233,11 @@ export default function WalletStatus() {
       case WALLET_STATES.NO_WALLET:
         {
           const url = copy.wallet.installWalletUrl;
-          // Only allow https URLs for security
-          if (typeof url === "string" && url.startsWith("https://")) {
-            window.open(url, "_blank", "noopener,noreferrer");
+          // Keep navigation bound to the canonical trusted destination.
+          if (url === TRUSTED_WALLET_INSTALL_URL) {
+            window.open(TRUSTED_WALLET_INSTALL_URL, "_blank", "noopener,noreferrer");
           } else {
-            console.error(
-              "Blocked attempt to open a non-HTTPS wallet URL for security reasons:",
-              url
-            );
+            console.error("Blocked attempt to open an untrusted wallet URL.");
           }
         }
         break;

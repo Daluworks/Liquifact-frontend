@@ -79,14 +79,20 @@ describe("WalletStatus external navigation", () => {
     expect(errorSpy).not.toHaveBeenCalled();
   });
 
-  it("blocks an insecure (http) URL and logs an error", async () => {
-    copy.wallet.installWalletUrl = "http://insecure-wallet-site.com";
+  it.each([
+    "http://insecure-wallet-site.com",
+    "https://untrusted-wallet-site.com",
+    "https://www.stellar.org.untrusted-wallet-site.com/wallets",
+    "//www.stellar.org/wallets",
+    "not a URL",
+  ])("blocks an untrusted wallet URL (%s)", async (url) => {
+    copy.wallet.installWalletUrl = url;
     await connectToReachNoWalletState();
 
     const installButton = screen.getByRole("button", { name: /install/i });
     fireEvent.click(installButton);
 
     expect(openSpy).not.toHaveBeenCalled();
-    expect(errorSpy).toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith("Blocked attempt to open an untrusted wallet URL.");
   });
 });

@@ -5,7 +5,7 @@ labels: type:feature, area:marketplace, stack:nextjs, stack:react, stack:typescr
 assignees: ''
 ---
 
-## Optimistic marketplace
+## Optimistic marketplace 
 
 ### Description
 marketplace mutations wait for the server before updating the UI, feeling sluggish. This issue adds optimistic updates with rollback.
