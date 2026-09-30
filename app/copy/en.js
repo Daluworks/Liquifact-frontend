@@ -77,6 +77,10 @@
  * @property {string} invest.detail.actionGroupLabel
  * @property {string} invest.detail.labelReference
  * @property {string} invest.detail.exportGroupLabel
+ * @property {string} invest.detail.notFoundStatusLabel
+ * @property {string} invest.detail.notFoundHeading
+ * @property {string} invest.detail.notFoundDescription
+ * @property {string} invest.detail.notFoundMarketplaceLabel
  * @property {string} invest.detail.exportCSVButton
  * @property {string} invest.detail.exportCSVLabel
  * @property {string} invest.detail.exportJSONButton
@@ -431,6 +435,12 @@ export const copy = {
       densityCompactAriaLabel: "Switch to compact density",
       densityComfortableAriaLabel: "Switch to comfortable density",
       densityCurrentAriaLabel: "Current density: {density}",
+      // Invoice-not-found boundary (app/invest/[id]/not-found.js)
+      notFoundStatusLabel: "404",
+      notFoundHeading: "Invoice not found",
+      notFoundDescription:
+        "We could not find that invoice in the marketplace. It may have been removed or the link might be incorrect.",
+      notFoundMarketplaceLabel: "\u2190 Browse marketplace",
       networkMismatch: {
         // Banner shown when the wallet is connected to the wrong network.
         // {walletNetwork} and {invoiceNetwork} are replaced at render time.

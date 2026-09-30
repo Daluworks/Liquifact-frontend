@@ -31,7 +31,7 @@ import StatusPill from "@/components/StatusPill";
 import InvoiceTimeline from "@/components/InvoiceTimeline";
 import { copy } from "@/app/copy/en";
 import { INVALID_VALUE_FALLBACK, formatCurrency, formatAmount } from "@/lib/format/currency";
-import { getInvoiceById } from "../lib";
+import { getInvoiceById, validateInvoiceId } from "../lib";
 import FundActions from "./FundActions";
 import { RouteFocus } from "./FocusManager";
 import InvoiceDetailClient from "./InvoiceDetailClient";
@@ -124,6 +124,14 @@ export default async function InvoiceDetailPage({ params, searchParams }) {
   // Support both the current (sync object) and future (Promise) params shape.
   const { id } = await Promise.resolve(params);
   const backHref = getMarketplaceHref(searchParams || {});
+
+  // Validate the raw URL segment before touching the data layer.
+  // Invalid IDs (non-string, empty, too long, unsafe chars) are treated as
+  // "not found" — they can never match a real invoice, and we must not forward
+  // attacker-controlled strings into the lookup or into the DOM.
+  if (!validateInvoiceId(id).valid) {
+    notFound();
+  }
 
   const invoice = getInvoiceById(id);
 
