@@ -40,9 +40,40 @@
  * The `onSave` callback (optional) receives the field key and the new raw
  * value string when a save succeeds. The parent (page.js) may wire this to
  * an API call in future.
+ *
+ * Concurrency & idempotency (issue #1138)
+ * ──────────────────────────────────────
+ * Inline saves may be asynchronous (the parent can persist to an API). To make
+ * repeated or concurrent execution deterministic, every row enforces:
+ *
+ *   I1 · Single-flight — a second save attempt (double-click, Enter racing a
+ *        click, programmatic re-entry) is ignored while one is unresolved.
+ *   I2 · Idempotent — saving an unchanged value, or a value already committed
+ *        by this row, emits no request.
+ *   I3 · No stale clobber — an edit session is bound to the `rawValue` it began
+ *        from; if that value changes underneath (a concurrent external update)
+ *        the stale draft is rejected rather than overwriting newer data.
+ *   I4 · Latest-wins — resolutions from superseded or unmounted attempts are
+ *        discarded and never mutate state.
+ *
+ * A rejected save keeps the row in edit mode with the draft preserved and the
+ * lock released, so retrying is safe and re-uses the same value.
  */
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+// ── Concurrency invariants (issue #1138) ─────────────────────────────────
+// EditableRow enforces four invariants for any `onSave` (sync or async):
+//
+//   I1 · Single-flight — a second save attempt during an unresolved `onSave` is a no-op.
+//   I2 · Idempotent     — an unchanged value, or one already committed by this row,
+//                          emits no request.
+//   I3 · No stale clobber — an edit session bound to an outdated `rawValue` is rejected
+//                          and resynced rather than overwriting a newer external value.
+//   I4 · Latest-wins    — resolutions from superseded or unmounted attempts are discarded
+//                          and never call `setState`.
+//
+// These invariants are tested in `InvoiceDetailClient.concurrency.test.tsx`.
+//
 import CopyButton from "@/components/CopyButton";
 import DensityToggle from "@/components/DensityToggle";
 import { useDensity } from "@/lib/hooks/useDensity";
@@ -64,6 +95,10 @@ const ie = copy.invest.detail.inlineEdit;
 /**
  * A single dt/dd pair that can switch between view and inline-edit mode.
  *
+ * `onSave` may be synchronous (fire-and-forget) or asynchronous (returns a
+ * promise when the parent persists to an API). This component treats both
+ * identically and never blocks the first paint on a save.
+ *
  * @param {object}   props
  * @param {string}   props.field         - Machine key (e.g. "issuer", "amount")
  * @param {string}   props.label         - Human-readable label shown in the <dt>
@@ -74,7 +109,9 @@ const ie = copy.invest.detail.inlineEdit;
  * @param {(value:string) => string | null} [props.validator] - Live validator
  *   returning `null` when valid or an error message string. Defaults to
  *   {@link getInvoiceFieldValidator} keyed off `field`.
- * @param {(field:string, value:string)=>void} props.onSave - Callback on success
+ * @param {(field:string, value:string)=>void|Promise<void>} props.onSave
+ *   Callback fired once per committed save. A thrown error or a rejected
+ *   promise keeps the row open so the user can retry idempotently.
  * @param {(msg:string)=>void} props.onAnnounce - Shared live-region setter
  */
 function EditableRow({
@@ -89,11 +126,39 @@ function EditableRow({
   onAnnounce,
 }) {
   const [isEditing, setIsEditing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [draft, setDraft] = useState(rawValue);
   const inputRef = useRef(null);
   const reactId = useId();
   const inputElId = `inline-edit-${field}-${reactId}`;
   const errorElId = `inline-edit-error-${field}-${reactId}`;
+
+  // ── Concurrency-control refs (issue #1138) ────────────────────────────
+  /**
+   * I1 — true while an `onSave` has been dispatched for this row and not yet
+   * resolved (including failure resolution). No second save attempt lands.
+   */
+  const inFlightRef = useRef(false);
+  /** I4 — monotonic attempt id; only the current attempt may commit state. */
+  const attemptRef = useRef(0);
+  /** I3 — authoritative value the active edit session was opened against. */
+  const editBaseRef = useRef(rawValue);
+  /**
+   * I2 — last value successfully committed through `onSave`.
+   * A save whose trimmed draft equals this value is a no-op.
+   */
+  const lastCommittedRef = useRef(null);
+  /** I4 — set false on unmount so late resolutions never call setState. */
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      // Invalidate any attempt still in flight at unmount time.
+      attemptRef.current += 1;
+    };
+  }, []);
 
   // Resolve the live validator: caller-supplied wins, otherwise fall back to
   // the field-keyed validator from `lib/validation/invoice`. We freeze the
@@ -129,32 +194,101 @@ function EditableRow({
   }, [isEditing]);
 
   const handleEdit = () => {
+    // A row that is mid-save stays locked; re-opening it would fork the
+    // edit session and allow a stale draft to race the in-flight request.
+    if (inFlightRef.current) return;
+    // I3 — bind the new edit session to the authoritative value it starts from.
+    editBaseRef.current = rawValue;
     setDraft(rawValue);
     setIsEditing(true);
   };
 
   const handleCancel = useCallback(() => {
+    // I1 — ignore cancel while a save is in flight so the row cannot be left
+    // half-committed; the request continues and resolves to success/failure.
+    if (inFlightRef.current) return;
+    // Invalidate any prior attempt so a late resolution cannot re-open the row.
+    attemptRef.current += 1;
     setIsEditing(false);
     setDraft(rawValue);
     onAnnounce(ie.announceCancelled);
   }, [rawValue, onAnnounce]);
 
-  const handleSave = useCallback(() => {
+  const handleSave = useCallback(async () => {
+    // I1 — single-flight: ignore re-entrant attempts. A double-click, an Enter
+    // keypress racing a click, or a programmatic re-entry all land here.
+    if (inFlightRef.current) return;
+
     if (isInvalid) {
       // Defensive guard: Save button is `disabled` while invalid, but an
       // Enter keypress on a non-disabled text input could still reach here
       // if the browser fires a synthetic click. Announce without saving so
       // the user understands why nothing happened.
-      onAnnounce(`Save failed: ${error ?? ie.errorRequired.replace("{field}", label)}`);
+      onAnnounce(
+        ie.announceSaveFailed
+          .replace("{field}", label)
+          .replace("{error}", error ?? ie.errorRequired.replace("{field}", label))
+      );
       return;
     }
-    setIsEditing(false);
-    onAnnounce(ie.announceSaved.replace("{field}", label));
-    onSave(field, trimmedDraft);
-  }, [isInvalid, error, label, field, onSave, onAnnounce, trimmedDraft]);
+
+    const currentValue = typeof rawValue === "string" ? rawValue.trim() : rawValue; // I3 — reject a stale draft. If the authoritative value moved since this
+    // edit session began, resync instead of clobbering the newer value.
+    // npm run build resolves to `Object.is` semantics for refs, so a strict
+    // comparison is intentional: only an exact move-away is rejected.
+    if (editBaseRef.current !== rawValue) {
+      editBaseRef.current = rawValue;
+      setDraft(rawValue);
+      onAnnounce(ie.announceStale.replace("{field}", label));
+      return;
+    }
+
+    // I2 — idempotent no-op: nothing changed, or this exact value was already
+    // committed by this row. Emitting a request would be duplicate work.
+    if (trimmedDraft === currentValue || trimmedDraft === lastCommittedRef.current) {
+      setIsEditing(false);
+      setDraft(rawValue);
+      onAnnounce(ie.announceNoChange.replace("{field}", label));
+      return;
+    }
+
+    // Acquire the lock *before* the async boundary so a synchronous re-entry
+    // (e.g. two keydowns dispatched in the same tick) is blocked as well.
+    inFlightRef.current = true;
+    setIsSaving(true);
+    const attempt = (attemptRef.current += 1);
+
+    try {
+      const result = onSave(field, trimmedDraft);
+      if (result && typeof result.then === "function") {
+        await result;
+      }
+      // I4 — a superseded or unmounted attempt must never commit.
+      if (attempt !== attemptRef.current || !mountedRef.current) return;
+      lastCommittedRef.current = trimmedDraft;
+      editBaseRef.current = trimmedDraft;
+      setIsSaving(false);
+      setIsEditing(false);
+      onAnnounce(ie.announceSaved.replace("{field}", label));
+    } catch (err) {
+      if (attempt !== attemptRef.current || !mountedRef.current) return;
+      setIsSaving(false);
+      // Keep the draft and release the lock so a retry re-uses the same value.
+      const message = err instanceof Error ? err.message : String(err ?? "");
+      onAnnounce(
+        ie.announceSaveFailed.replace("{field}", label).replace("{error}", message || label)
+      );
+    } finally {
+      if (attempt === attemptRef.current) {
+        inFlightRef.current = false;
+      }
+    }
+  }, [isInvalid, error, label, field, onSave, onAnnounce, trimmedDraft, rawValue]);
 
   const handleKeyDown = useCallback(
     (e) => {
+      // Ignore keyboard shortcuts routed at a row whose save is in flight.
+      if (inFlightRef.current) return;
       if (e.key === "Escape") {
         e.preventDefault();
         handleCancel();
@@ -188,6 +322,8 @@ function EditableRow({
               aria-label={label}
               aria-describedby={isInvalid ? errorElId : undefined}
               aria-invalid={isInvalid}
+              aria-busy={isSaving}
+              readOnly={isSaving}
               pattern={inputPattern}
               data-testid={`inline-edit-input-${field}`}
               className={[
@@ -212,18 +348,21 @@ function EditableRow({
               <button
                 type="button"
                 onClick={handleSave}
-                disabled={isInvalid}
-                aria-disabled={isInvalid}
+                disabled={isInvalid || isSaving}
+                aria-disabled={isInvalid || isSaving}
+                aria-busy={isSaving}
                 data-testid={`inline-edit-save-${field}`}
                 className="px-3 py-1 bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-700 disabled:hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60 text-white text-xs font-medium rounded transition-colors focus-ring"
               >
-                {ie.saveButton}
+                {isSaving ? ie.savingButton : ie.saveButton}
               </button>
               <button
                 type="button"
                 onClick={handleCancel}
+                disabled={isSaving}
+                aria-disabled={isSaving}
                 data-testid={`inline-edit-cancel-${field}`}
-                className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium rounded transition-colors focus-ring"
+                className="px-3 py-1 bg-slate-800 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60 text-slate-300 text-xs font-medium rounded transition-colors focus-ring"
               >
                 {ie.cancelButton}
               </button>
@@ -290,12 +429,10 @@ export default function InvoiceDetailClient({
     setAnnouncement(msg);
   }, []);
 
-  const handleSave = useCallback(
-    (field, value) => {
-      onSave?.(field, value);
-    },
-    [onSave]
-  );
+  // Forward the callback's return value so an async `onSave` (one that returns
+  // a promise) is awaited by the row. Dropping it here would make every save
+  // look instantly successful and defeat the single-flight/idempotency guards.
+  const handleSave = useCallback((field, value) => onSave?.(field, value), [onSave]);
 
   // Clear announcement after it has been read (100 ms grace period keeps it
   // in the DOM long enough for screen readers to pick it up).

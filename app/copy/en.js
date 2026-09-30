@@ -456,6 +456,10 @@ export const copy = {
         errorRequired: "{field} is required.",
         announceSaved: "{field} updated successfully.",
         announceCancelled: "Edit cancelled.",
+        savingButton: "Saving…",
+        announceNoChange: "{field} already matches the saved value.",
+        announceSaveFailed: "{field} could not be saved: {error}",
+        announceStale: "{field} was updated elsewhere. Showing the latest value.",
       },
       bulk: {
         sectionHeading: "Invoice documents",
