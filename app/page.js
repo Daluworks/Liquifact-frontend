@@ -1,13 +1,21 @@
 "use client";
 
 import Link from "next/link";
-import { useRef, useState, useEffect } from "react";
+import { useReducer, useRef, useEffect } from "react";
 import NavMenu from "../components/NavMenu";
 import { copy } from "./copy/en";
 import { getHealth } from "../lib/api/health";
 import { env } from "../lib/config/env";
 import { extractKnownFields, safeJsonStringify } from "../lib/format/safeJson";
 import HealthStatusSkeleton from "../components/HealthStatusSkeleton";
+import {
+  healthReducer,
+  initialHealthState,
+  normalizeHealthResult,
+  classifyFailure,
+  STATUS,
+  FAILURE_REASON,
+} from "../lib/health/healthState";
 
 const API_URL = env.apiUrl;
 
@@ -42,33 +50,73 @@ const getStatusConfig = (status) => {
   }
 };
 
+const TERMINAL_STATUSES = new Set([STATUS.CONNECTED, STATUS.DEGRADED, STATUS.UNREACHABLE]);
+
+/**
+ * State invariants (see lib/health/healthState.js for the full list):
+ *  - Only one health request is in flight at a time (synchronous ref guard + reducer guard).
+ *  - A result is applied only if it belongs to the current request (requestId match).
+ *  - Results are normalized, so `health.status` is always a known status and
+ *    `health.message` is always a string.
+ *  - A thrown error always ends in "unreachable"; it never leaves a stale result on screen.
+ *  - No state updates after unmount; the in-flight request is aborted on unmount.
+ */
 export default function Home() {
-  const [health, setHealth] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [state, dispatch] = useReducer(healthReducer, initialHealthState);
   const abortRef = useRef(null);
+  const inFlightRef = useRef(false);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       abortRef.current?.abort();
     };
   }, []);
 
+  const loading = state.status === STATUS.LOADING;
+
+  // Same shape the render code always used: { status, message, details?, ... }
+  const health = TERMINAL_STATUSES.has(state.status)
+    ? { message: "", ...(state.payload || {}), status: state.status }
+    : null;
+
   const checkApi = async () => {
-    abortRef.current?.abort();
+    // Synchronous guard: two clicks in the same tick cannot start two requests.
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+
+    // Matches the id the reducer assigns on START (state.requestId + 1).
+    const requestId = state.requestId + 1;
     const controller = new AbortController();
     abortRef.current = controller;
+    dispatch({ type: "START" });
 
-    setLoading(true);
+    const send = (action) => {
+      if (mountedRef.current && !controller.signal.aborted) {
+        dispatch({ ...action, requestId });
+      }
+    };
+
     try {
       const result = await getHealth(API_URL, { signal: controller.signal });
-      if (controller.signal.aborted) return;
-      setHealth(result);
-    } catch (err) {
-      if (err?.name === "AbortError") return;
-    } finally {
-      if (!controller.signal.aborted) {
-        setLoading(false);
+      const payload = normalizeHealthResult(result);
+
+      if (payload.status === STATUS.CONNECTED) {
+        send({ type: "SUCCESS", payload });
+      } else if (payload.status === STATUS.DEGRADED) {
+        send({ type: "DEGRADED", payload });
+      } else {
+        send({ type: "FAILURE", reason: FAILURE_REASON.NETWORK, payload });
       }
+    } catch (err) {
+      if (err?.name === "AbortError") return; // unmount abort: nothing to render
+      // Never leave a stale result or an endless spinner; store a safe code only.
+      send({ type: "FAILURE", reason: classifyFailure(err) });
+    } finally {
+      inFlightRef.current = false;
+      if (abortRef.current === controller) abortRef.current = null;
     }
   };
 
