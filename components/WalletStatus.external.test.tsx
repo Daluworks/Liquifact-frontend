@@ -7,6 +7,7 @@ import { ToastProvider } from "./ToastProvider";
 import { WalletProvider, useWallet } from "./WalletProvider";
 import WalletStatus from "./WalletStatus";
 import { copy } from "../app/copy/en";
+import { TRUSTED_WALLET_INSTALL_URL } from "../app/copy/constants";
 
 jest.mock("@stellar/freighter-api", () => ({
   isConnected: jest.fn().mockResolvedValue(false),
@@ -72,7 +73,7 @@ describe("WalletStatus external navigation", () => {
 
     expect(openSpy).toHaveBeenCalledTimes(1);
     expect(openSpy).toHaveBeenCalledWith(
-      copy.wallet.installWalletUrl,
+      TRUSTED_WALLET_INSTALL_URL,
       "_blank",
       "noopener,noreferrer"
     );
