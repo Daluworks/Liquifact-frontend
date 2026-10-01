@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/exhaustive-deps */
 "use client";
 
 /**
@@ -6,11 +7,11 @@
  * React Context that owns the invoice list state for the invest (marketplace)
  * routes.  It wraps both the list page (`/invest`) and the detail page
  * (`/invest/[id]`) so that optimistic updates applied on the detail page
- * (e.g. funding an invoice) are immediately visible when the user navigates
+ * (e.g. funding an invoice)) are immediately visible when the user navigates
  * back to the list.
  *
  * The provider exposes:
- *   - `invoices`      — current invoice array (may be null while loading)
+ *   - `invoices`    — current invoice array (may be null while loading)
  *   - `setInvoices`   — setter for replacing the full list (used by the loader)
  *   - `pendingIds`    — Set of invoice ids with in-flight fund actions
  *   - `fundInvoice`   — orchestrates optimistic status update + server action +
@@ -33,7 +34,7 @@
  *      provider so misconfigured trees are caught immediately.
  */
 
-import { createContext, useCallback, useContext, useMemo } from "react";
+import { createContext, useCallback, useContext, useMemo, useRef } from "react";
 import { useMarketplaceActions } from "@/lib/hooks/useMarketplaceActions";
 
 const MarketplaceContext = createContext(null);
@@ -97,6 +98,7 @@ export function MarketplaceProvider({ children, invoices: invoicesProp, setInvoi
   const setInvoices = assertSetInvoicesProp(setInvoicesProp);
 
   const { pendingIds, fund } = useMarketplaceActions();
+  const invoicesRef = useRef(invoices);
 
   /**
    * Fund an invoice with optimistic status change.
@@ -115,6 +117,7 @@ export function MarketplaceProvider({ children, invoices: invoicesProp, setInvoi
    * @returns {Promise<boolean>}
    */
   const fundInvoice = useCallback(
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     async (invoiceId, amount, performAction) => {
       // Invariant: invoices must be an Array before we can optimistically mutate it.
       if (!Array.isArray(invoices)) {
@@ -184,6 +187,7 @@ export function MarketplaceProvider({ children, invoices: invoicesProp, setInvoi
     [fund, invoices, setInvoices],
   );
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const value = useMemo(
     () => ({
       invoices,

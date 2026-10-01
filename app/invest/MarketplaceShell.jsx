@@ -1,10 +1,10 @@
 "use client";
 
 /**
- * @file MarketplaceShell.jsx
+ * @file app/invest/MarketplaceShell.jsx
  *
- * Thin client wrapper that manages the shared invoice state for the invest
- * routes and wraps child routes with the MarketplaceProvider.
+ * Client-boundary wrapper that owns the shared invoice state for all
+ * `/invest` routes and provides it via `MarketplaceProvider`.
  *
  * Extracted from layout.js so the Server Component layout can compose a
  * client boundary without pulling all state-management logic into the layout.

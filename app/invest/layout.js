@@ -2,7 +2,7 @@ import { isValidElement } from "react";
 import MarketplaceShell from "./MarketplaceShell";
 
 /**
- * Layout for all /invest routes.
+ * @file app/invest/layout.js
  *
  * Wraps the list page and detail page with MarketplaceShell so that
  * invoice state (including optimistic updates) is shared across navigations
