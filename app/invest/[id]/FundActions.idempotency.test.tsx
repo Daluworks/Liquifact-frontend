@@ -136,6 +136,9 @@ const fundingCopy = copy.invest.detail.funding;
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
 function clearSessionIdem() {
+  Object.keys(localStorage).forEach((k) => {
+    if (k.startsWith("liquifact-idem-")) localStorage.removeItem(k);
+  });
   Object.keys(sessionStorage).forEach((k) => {
     if (k.startsWith("liquifact-idem-")) sessionStorage.removeItem(k);
   });
