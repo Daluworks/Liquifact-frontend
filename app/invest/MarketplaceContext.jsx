@@ -17,12 +17,21 @@
  *   - `fundInvoice`   — orchestrates optimistic status update + server action +
  *                        rollback on failure with toast feedback
  *
- * Failure-recovery invariants:
- *   - Optimistic updates are applied atomically per invoice id.
- *   - Rollback restores the exact pre-action snapshot for that invoice only,
- *     so concurrent fund actions on other invoices are never clobbered.
- *   - Duplicate/concurrent fund calls for the same id are rejected by the
- *     underlying `fund` hook (pendingIds guard) and never mutate state twice.
+ * Invariants enforced here:
+ *   1. `invoices` prop must be `null` or a plain Array; other values are
+ *      treated as `null` (loading sentinel) and a dev-time warning is emitted.
+ *   2. `setInvoices` prop must be a function; a missing or invalid value is
+ *      replaced with a no-op in development so callers don't crash silently.
+ *   3. `fundInvoice` guards against a non-Array `invoices` state before
+ *      attempting an optimistic update — it bails out early rather than
+ *      corrupting state.
+ *   4. The optimistic update is applied and the snapshot captured in a single
+ *      synchronous pass to avoid partial-update windows.
+ *   5. Rollback is atomic: it replaces only the targeted invoice and leaves
+ *      the rest of the list untouched, even if `invoices` has changed during
+ *      the async action.
+ *   6. `useMarketplace` throws a descriptive error when called outside a
+ *      provider so misconfigured trees are caught immediately.
  */
 
 import { createContext, useCallback, useContext, useMemo, useRef } from "react";
@@ -30,32 +39,77 @@ import { useMarketplaceActions } from "@/lib/hooks/useMarketplaceActions";
 
 const MarketplaceContext = createContext(null);
 
+// ─── Invariant helpers ────────────────────────────────────────────────────────
+
 /**
- * @param {object} props
- * @param {React.ReactNode} props.children
- * @param {Array|null} props.invoices   — invoice array managed by the parent
- * @param {Function} props.setInvoices  — setter to replace the full invoice list
+ * Validate the `invoices` prop.  Returns the value when valid, or `null` with
+ * a dev-time warning when the value violates the `null | Array` invariant.
+ *
+ * @param {*} value
+ * @returns {Array|null}
  */
-export function MarketplaceProvider({ children, invoices, setInvoices }) {
-  // eslint-disable-next-line react-hooks/rules-of-hooks
+function assertInvoicesProp(value) {
+  if (value === null || value === undefined) return null;
+  if (Array.isArray(value)) return value;
+
+  if (process.env.NODE_ENV !== "production") {
+    // eslint-disable-next-line no-console
+    console.error(
+      "[MarketplaceProvider] Invalid `invoices` prop: expected null or Array, got %s. " +
+        "Treating as null (loading sentinel) to preserve the state invariant.",
+      typeof value,
+    );
+  }
+  return null;
+}
+
+/**
+ * Validate the `setInvoices` prop.  Returns the function when valid, or a
+ * no-op with a dev-time warning when the value is not callable.
+ *
+ * @param {*} value
+ * @returns {Function}
+ */
+function assertSetInvoicesProp(value) {
+  if (typeof value === "function") return value;
+
+  if (process.env.NODE_ENV !== "production") {
+    // eslint-disable-next-line no-console
+    console.error(
+      "[MarketplaceProvider] Invalid `setInvoices` prop: expected a function, got %s. " +
+        "Using a no-op to prevent crashes — invoice state will NOT be updated.",
+      typeof value,
+    );
+  }
+  return () => {};
+}
+
+// ─── Provider ─────────────────────────────────────────────────────────────────
+
+/**
+ * @param {object}          props
+ * @param {React.ReactNode} props.children
+ * @param {Array|null}      props.invoices   — invoice array managed by the parent
+ * @param {Function}        props.setInvoices — setter to replace the full invoice list
+ */
+export function MarketplaceProvider({ children, invoices: invoicesProp, setInvoices: setInvoicesProp }) {
+  // Invariant: coerce invalid prop values before they reach any consumer.
+  const invoices = assertInvoicesProp(invoicesProp);
+  const setInvoices = assertSetInvoicesProp(setInvoicesProp);
+
   const { pendingIds, fund } = useMarketplaceActions();
   const invoicesRef = useRef(invoices);
 
   /**
    * Fund an invoice with optimistic status change.
    *
-   * 1. Optimistically flip the invoice's status to "Funded".
-   * 2. Run the caller-provided async action.
-   * 3. On success — the optimistic status stays (committed).
-   * 4. On failure — the invoice reverts to its original status and the error
-   *    is re-thrown so the caller can surface a toast.
-   * 5. Concurrent calls for the same invoice id are rejected deterministically
-   *    (returns false) so retries/duplicates cannot interleave optimistic
-   *    updates or rollbacks and corrupt state.
-   *
-   * Determinism: the snapshot is captured from the latest `invoices` value
-   * via a functional setter, so retries and concurrent updates cannot race
-   * the rollback against a stale closure.
+   * Invariants:
+   *   - Only proceeds when `invoices` is a valid Array; returns false and logs
+   *     a warning if the state is not yet initialised (null) or invalid.
+   *   - The snapshot and the optimistic flip happen in a single synchronous
+   *     call to `setInvoices` to avoid a partial-update race window.
+   *   - Rollback is atomic: targets only the invoice matching `invoiceId` and
+   *     restores the snapshot, leaving every other invoice untouched.
    *
    * @param {string}   invoiceId
    * @param {number}   amount
@@ -65,51 +119,72 @@ export function MarketplaceProvider({ children, invoices, setInvoices }) {
   const fundInvoice = useCallback(
     // eslint-disable-next-line react-hooks/exhaustive-deps
     async (invoiceId, amount, performAction) => {
-      // Keep the ref in sync so the optimistic/rollback callbacks always read
-      // the latest invoices array even if the closure is stale.
-      invoicesRef.current = invoices;
+      // Invariant: invoices must be an Array before we can optimistically mutate it.
+      if (!Array.isArray(invoices)) {
+        if (process.env.NODE_ENV !== "production") {
+          // eslint-disable-next-line no-console
+          console.error(
+            "[MarketplaceProvider] fundInvoice called while invoices is %s. " +
+              "Cannot apply optimistic update — action aborted.",
+            invoices === null ? "null (still loading)" : typeof invoices,
+          );
+        }
+        return false;
+      }
 
       return fund(invoiceId, amount, performAction, {
+        /**
+         * Optimistic update — synchronously flip the target invoice's status
+         * to "Funded" and return a deep-enough snapshot for rollback.
+         *
+         * The snapshot is captured inside the updater function so it reflects
+         * the state at the moment the update is applied, not the stale closure
+         * value of `invoices`, protecting against concurrent updates.
+         *
+         * @param {string} id
+         * @returns {{snapshot: object|null}}
+         */
         optimisticUpdate: (id) => {
-          // Snapshot the current invoice for rollback.
-          const current = invoicesRef.current?.find((inv) => inv.id === id) ?? null;
-          const snapshot = current ? { ...current } : null;
+          let snapshot = null;
 
-          // Flip status immediately. Preserve the original status so rollback
-          // restores the exact prior state (not a hard-coded default).
           setInvoices((prev) => {
             if (!Array.isArray(prev)) return prev;
-            let changed = false;
-            const next = prev.map((inv) => {
-              if (inv.id !== id) return inv;
-              if (inv.status === "Funded") return inv;
-              changed = true;
-              return { ...inv, status: "Funded" };
-            });
-            return changed ? next : prev;
+
+            // Capture snapshot of the current invoice for atomic rollback.
+            const current = prev.find((inv) => inv.id === id) ?? null;
+            // Shallow-clone is sufficient because we only mutate `status`.
+            snapshot = current ? { ...current } : null;
+
+            // Flip status immediately (optimistic).
+            return prev.map((inv) =>
+              inv.id === id ? { ...inv, status: "Funded" } : inv,
+            );
           });
 
           return snapshot;
         },
-        rollback: (id, snapshot) => {
-          if (!snapshot) return;
+
+        /**
+         * Rollback — atomically restore the original invoice object.
+         *
+         * Uses the functional updater form so it always operates on the latest
+         * state, even if other concurrent updates have run since the optimistic
+         * flip. Only the targeted invoice is touched; the rest of the list is
+         * left exactly as-is.
+         *
+         * @param {string}      id
+         * @param {object|null} snap — snapshot returned by optimisticUpdate
+         */
+        rollback: (id, snap) => {
+          if (!snap) return;
           setInvoices((prev) => {
             if (!Array.isArray(prev)) return prev;
-            let changed = false;
-            const next = prev.map((inv) => {
-              if (inv.id !== id) return inv;
-              // Only roll back if the entry is still the optimistic version;
-              // a concurrent commit must not be clobbered.
-              if (inv.status !== "Funded") return inv;
-              changed = true;
-              return snapshot;
-            });
-            return changed ? next : prev;
+            return prev.map((inv) => (inv.id === id ? snap : inv));
           });
         },
       });
     },
-    [fund, setInvoices]
+    [fund, invoices, setInvoices],
   );
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -120,7 +195,7 @@ export function MarketplaceProvider({ children, invoices, setInvoices }) {
       pendingIds,
       fundInvoice,
     }),
-    [invoices, setInvoices, pendingIds, fundInvoice]
+    [invoices, setInvoices, pendingIds, fundInvoice],
   );
 
   return (
@@ -129,6 +204,8 @@ export function MarketplaceProvider({ children, invoices, setInvoices }) {
     </MarketplaceContext.Provider>
   );
 }
+
+// ─── Consumer hook ────────────────────────────────────────────────────────────
 
 /**
  * Access marketplace invoice state and the optimistic fund action.
@@ -139,6 +216,7 @@ export function MarketplaceProvider({ children, invoices, setInvoices }) {
  *   pendingIds: Set<string>,
  *   fundInvoice: (invoiceId: string, amount: number, performAction: () => Promise<void>) => Promise<boolean>
  * }}
+ * @throws {Error} When called outside a MarketplaceProvider.
  */
 export function useMarketplace() {
   const ctx = useContext(MarketplaceContext);
