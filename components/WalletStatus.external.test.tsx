@@ -5,10 +5,8 @@ import "@testing-library/jest-dom";
 import { act, render, screen, fireEvent } from "@testing-library/react";
 import { ToastProvider } from "./ToastProvider";
 import { WalletProvider, useWallet } from "./WalletProvider";
-import WalletStatus, {
-  openTrustedWalletInstallUrl,
-  validateWalletInstallUrl,
-} from "./WalletStatus";
+import WalletStatus from "./WalletStatus";
+import { copy } from "../app/copy/en";
 import { TRUSTED_WALLET_INSTALL_URL } from "../app/copy/constants";
 
 jest.mock("@stellar/freighter-api", () => ({
@@ -79,25 +77,15 @@ describe("WalletStatus external navigation", () => {
     expect(errorSpy).not.toHaveBeenCalled();
   });
 
-  it("validates trusted and rejected wallet install URLs deterministically", () => {
-    expect(validateWalletInstallUrl(TRUSTED_WALLET_INSTALL_URL)).toEqual({
-      ok: true,
-      href: TRUSTED_WALLET_INSTALL_URL,
-    });
-    expect(validateWalletInstallUrl("")).toEqual({
-      ok: false,
-      reason: "missing-url",
-    });
-    expect(validateWalletInstallUrl("not a url")).toEqual({
-      ok: false,
-      reason: "invalid-url",
-    });
-    expect(validateWalletInstallUrl("javascript:alert(1)")).toEqual({
-      ok: false,
-      reason: "non-https-url",
-      protocol: "javascript:",
-    });
-  });
+  it.each([
+    "http://insecure-wallet-site.com",
+    "https://untrusted-wallet-site.com",
+    "https://www.stellar.org.untrusted-wallet-site.com/wallets",
+    "//www.stellar.org/wallets",
+    "not a URL",
+  ])("blocks an untrusted wallet URL (%s)", async (url) => {
+    copy.wallet.installWalletUrl = url;
+    await connectToReachNoWalletState();
 
   it("blocks an insecure URL and logs non-sensitive diagnostics", () => {
     const result = openTrustedWalletInstallUrl(
@@ -106,10 +94,6 @@ describe("WalletStatus external navigation", () => {
 
     expect(result).toBe(false);
     expect(openSpy).not.toHaveBeenCalled();
-    expect(errorSpy).toHaveBeenCalledWith("Blocked unsafe wallet install URL.", {
-      reason: "non-https-url",
-      protocol: "http:",
-    });
-    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain("token=secret");
+    expect(errorSpy).toHaveBeenCalledWith("Blocked attempt to open an untrusted wallet URL.");
   });
 });

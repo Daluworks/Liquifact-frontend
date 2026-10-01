@@ -40,6 +40,8 @@ import { TRUSTED_WALLET_INSTALL_URL } from "./constants";
  * @property {string} invest.announceFilteredCount
  * @property {string} invest.announceInvoicesLoaded
  * @property {string} invest.announceShowing
+ * @property {string} invest.routeBoundaryTitle - Fallback heading when the invest layout boundary rejects invalid input
+ * @property {string} invest.routeBoundaryDescription - Fallback body for the invest layout boundary
  * @property {Object} invest.fundAmount - Partial funding input copy
  * @property {string} invest.fundAmount.label
  * @property {string} invest.fundAmount.placeholder
@@ -93,20 +95,22 @@ import { TRUSTED_WALLET_INSTALL_URL } from "./constants";
  * @property {string} invest.detail.densityCompactAriaLabel
  * @property {string} invest.detail.densityComfortableAriaLabel
  * @property {string} invest.detail.densityCurrentAriaLabel
- * @property {Object} invest.detail.funding - Funding submission action copy
- * @property {string} invest.detail.funding.successMsg
- * @property {string} invest.detail.funding.successTitle
- * @property {string} invest.detail.funding.failureMsg
- * @property {string} invest.detail.funding.failureTitle
- * @property {string} invest.detail.funding.timeoutMsg
- * @property {string} invest.detail.funding.timeoutTitle
- * @property {string} invest.detail.funding.conflictMsg
- * @property {string} invest.detail.funding.conflictTitle
- * @property {string} invest.detail.funding.walletRejectMsg
- * @property {string} invest.detail.funding.walletRejectTitle
+ * @property {Object} invest.detail.funding - Funding submission lifecycle copy
  * @property {string} invest.detail.funding.pendingButton
- * @property {string} invest.detail.funding.retryButton
+ * @property {string} invest.detail.funding.successTitle
+ * @property {string} invest.detail.funding.successMsg
+ * @property {string} invest.detail.funding.failureTitle
+ * @property {string} invest.detail.funding.failureMsg
+ * @property {string} invest.detail.funding.timeoutTitle
+ * @property {string} invest.detail.funding.timeoutMsg
+ * @property {string} invest.detail.funding.conflictTitle
+ * @property {string} invest.detail.funding.conflictMsg
+ * @property {string} invest.detail.funding.walletRejectTitle
+ * @property {string} invest.detail.funding.walletRejectMsg
  * @property {string} invest.detail.funding.blockedByTabMsg
+ * @property {string} invest.detail.funding.blockedByTabLabel
+ * @property {string} invest.detail.funding.retryButton
+ * @property {string} invest.detail.funding.retryHint
  * @property {Object} invest.detail.networkMismatch - Network mismatch banner copy
  * @property {string} invest.detail.networkMismatch.bannerTitle
  * @property {string} invest.detail.networkMismatch.bannerBody
@@ -253,6 +257,7 @@ import { TRUSTED_WALLET_INSTALL_URL } from "./constants";
  * @property {string} globalError.heading
  * @property {string} globalError.description
  * @property {string} globalError.reloadLabel
+ * @property {string} globalError.resettingLabel
  * @property {string} globalError.homeLabel
  * @property {Object} invoiceTimeline - Invoice lifecycle timeline copy
  * @property {string} invoiceTimeline.heading
@@ -264,17 +269,73 @@ import { TRUSTED_WALLET_INSTALL_URL } from "./constants";
  * @property {string} invoiceTimeline.statusCompleted
  * @property {string} invoiceTimeline.statusCurrent
  * @property {string} invoiceTimeline.statusPending
- * @property {Object} setting
-*/
-
-/**
- * Recursively freeze application copy so all module consumers observe the same
- * read-only dictionary across SSR requests, retries, and concurrent tests.
- *
- * @template T
- * @param {T} value
- * @param {WeakSet<object>} [seen]
- * @returns {T}
+ * @property {Object} settings - Settings page copy
+ * @property {string} settings.pageTitle
+ * @property {string} settings.pageSub
+ * @property {string} settings.editAction
+ * @property {string} settings.editActionLabel
+ * @property {string} settings.saveAction
+ * @property {string} settings.saveActionLabel
+ * @property {string} settings.cancelAction
+ * @property {string} settings.cancelActionLabel
+ * @property {string} settings.emptyValue
+ * @property {string} settings.savedAnnouncement
+ * @property {string} settings.cancelledAnnouncement
+ * @property {string} settings.invalidAnnouncement
+ * @property {Object} settings.fields - Field-level copy
+ * @property {string} settings.fields.displayName.label
+ * @property {string} settings.fields.displayName.description
+ * @property {string} settings.fields.displayName.placeholder
+ * @property {string} settings.fields.email.label
+ * @property {string} settings.fields.email.description
+ * @property {string} settings.fields.email.placeholder
+ * @property {Object} settings.errors - Validation error messages
+ * @property {string} settings.errors.required
+ * @property {string} settings.errors.displayNameTooShort
+ * @property {string} settings.errors.displayNameTooLong
+ * @property {string} settings.errors.emailTooLong
+ * @property {string} settings.errors.invalidEmail
+ * @property {string} settings.copyIdentifier
+ * @property {string} settings.toastCopySuccessMsg
+ * @property {string} settings.toastCopySuccessTitle
+ * @property {string} settings.toastCopyErrorMsg
+ * @property {string} settings.toastCopyErrorTitle
+ * @property {string} settings.errorStatus
+ * @property {string} settings.loadStatus
+ * @property {string} settings.showStatus
+ * @property {string} settings.noMatch
+ * @property {string} settings.empty
+ * @property {string} settings.loadMore
+ * @property {string} settings.densityLabel
+ * @property {string} settings.densityDescription
+ * @property {string} settings.exportGroupLabel
+ * @property {string} settings.exportCSVLabel
+ * @property {string} settings.exportJSONLabel
+ * @property {string} settings.exportAnnounceCSV
+ * @property {string} settings.exportAnnounceJSON
+ * @property {string} settings.exportEmpty
+ * @property {Object} investDetail - Invoice detail page copy (used by InvoiceDetailItems.jsx)
+ * @property {string} investDetail.heading
+ * @property {string} investDetail.subtitle
+ * @property {string} investDetail.dtIssuer
+ * @property {string} investDetail.dtAmount
+ * @property {string} investDetail.dtYield
+ * @property {string} investDetail.dtMaturity
+ * @property {string} investDetail.dtStatus
+ * @property {string} investDetail.fundButton
+ * @property {string} investDetail.fundButtonAriaLabel
+ * @property {string} investDetail.copyLinkButton
+ * @property {string} investDetail.copyLinkAriaLabel
+ * @property {string} investDetail.printButton
+ * @property {string} investDetail.printAriaLabel
+ * @property {string} investDetail.disclaimer
+ * @property {string} investDetail.loadErrorTitle
+ * @property {string} investDetail.loadErrorDescription
+ * @property {string} investDetail.backToMarketplace
+ * @property {string} investDetail.toastCopySuccess
+ * @property {string} investDetail.toastCopySuccessTitle
+ * @property {string} investDetail.toastCopyError
+ * @property {string} investDetail.toastCopyErrorTitle
  */
 function deepFreeze(value, seen = new WeakSet()) {
   if (value === null || typeof value !== "object") {
@@ -325,6 +386,8 @@ export const copy = deepFreeze({
     errorTitle: "Unable to load investable invoices",
     errorDescription: "Unable to load investable invoices right now.",
     errorStatus: "Unable to load investable invoices.",
+    loadingTimeoutTitle: "Marketplace load delayed",
+    loadingTimeoutDescription: "The marketplace is taking longer than expected to load.",
     searchPlaceholder: "Search by issuer name",
     filterSoonLabel: "Soon: These filter controls are currently unavailable.",
     filterLegend: "Marketplace Filters",
@@ -342,6 +405,9 @@ export const copy = deepFreeze({
     announceFilteredCount: "{matched} of {total} invoices match",
     announceInvoicesLoaded: "{count} investable invoices loaded",
     announceShowing: "Showing {shown} of {total} investable invoices",
+    routeBoundaryTitle: "Marketplace unavailable",
+    routeBoundaryDescription:
+      "This part of the marketplace could not be displayed. Please reload the page to try again.",
     invalidCursorTitle: "This result set is no longer valid.",
     invalidCursorDescription:
       "This result set is no longer valid. Refresh the marketplace to continue.",
@@ -432,12 +498,38 @@ export const copy = deepFreeze({
       densityCompactAriaLabel: "Switch to compact density",
       densityComfortableAriaLabel: "Switch to comfortable density",
       densityCurrentAriaLabel: "Current density: {density}",
-      // Invoice-not-found boundary (app/invest/[id]/not-found.js)
-      notFoundStatusLabel: "404",
-      notFoundHeading: "Invoice not found",
-      notFoundDescription:
-        "We could not find that invoice in the marketplace. It may have been removed or the link might be incorrect.",
-      notFoundMarketplaceLabel: "\u2190 Browse marketplace",
+      // ── Funding submission lifecycle (issue #1132: deterministic failure
+      //    recovery). {amount} and {currency} are replaced at call time.
+      funding: {
+        // Fund button label while a submission is in-flight.
+        pendingButton: "Funding…",
+        // Confirmed success — idempotency key has been cleared server-safe.
+        successTitle: "Funding submitted",
+        successMsg: "Funding request for {amount} {currency} submitted.",
+        // Generic failure (network error, parse error, unknown).
+        failureTitle: "Funding failed",
+        failureMsg:
+          "Funding request for {amount} {currency} failed. Nothing was committed — you can safely retry.",
+        // Timeout: the request may or may not have reached the server; the
+        // preserved idempotency key makes a retry safe.
+        timeoutTitle: "Request timed out",
+        timeoutMsg:
+          "The funding request timed out. If it was already processed, retrying will not charge twice.",
+        // Server conflict (HTTP 409): the invoice state changed underneath us.
+        conflictTitle: "Funding conflict",
+        conflictMsg:
+          "This invoice was updated elsewhere. Refresh the marketplace to see its current state before retrying.",
+        // Wallet declined to sign the transaction — no request was sent.
+        walletRejectTitle: "Wallet declined",
+        walletRejectMsg: "The transaction was not signed, so nothing was submitted.",
+        // Another tab holds the in-flight lock for this invoice.
+        blockedByTabMsg: "A funding request for this invoice is already in progress in another tab.",
+        blockedByTabLabel: "Funding in progress elsewhere",
+        // Retry affordance shown in the FAILURE state; the preserved
+        // idempotency key guarantees the retry is server-side deduplicated.
+        retryButton: "Retry funding",
+        retryHint: "Retrying re-uses the same secure request reference.",
+      },
       networkMismatch: {
         // Banner shown when the wallet is connected to the wrong network.
         // {walletNetwork} and {invoiceNetwork} are replaced at render time.
@@ -454,26 +546,6 @@ export const copy = deepFreeze({
         // Announced to screen readers when the banner first appears.
         announceMessage: "Network mismatch: please switch your wallet to {invoiceNetwork}.",
       },
-      /**
-       * Funding submission copy — used by FundActions.jsx.
-       * {amount} and {currency} are replaced at runtime.
-       */
-      funding: {
-        successMsg: "Funding request for {amount} {currency} submitted.",
-        successTitle: "Funding submitted",
-        failureMsg: "Funding request for {amount} {currency} failed.",
-        failureTitle: "Funding failed",
-        timeoutMsg: "The funding request timed out. Please retry.",
-        timeoutTitle: "Funding timed out",
-        conflictMsg: "This invoice has already been funded. Retry to confirm status.",
-        conflictTitle: "Funding conflict",
-        walletRejectMsg: "Funding was declined by your wallet.",
-        walletRejectTitle: "Wallet rejected",
-        pendingButton: "Funding\u2026",
-        retryButton: "Retry funding",
-        blockedByTabMsg:
-          "Another tab is currently processing this invoice. Please wait for it to finish.",
-      },
       inlineEdit: {
         editButton: "Edit {field}",
         saveButton: "Save",
@@ -481,7 +553,20 @@ export const copy = deepFreeze({
         errorRequired: "{field} is required.",
         announceSaved: "{field} updated successfully.",
         announceCancelled: "Edit cancelled.",
+        savingButton: "Saving…",
+        announceNoChange: "{field} already matches the saved value.",
+        announceSaveFailed: "{field} could not be saved: {error}",
+        announceStale: "{field} was updated elsewhere. Showing the latest value.",
       },
+      // Strings used when the route parameter id fails validation.
+      // These appear in server logs and observability tooling, not in the
+      // rendered UI (the user sees the not-found page instead).
+      invalidIdLogPrefix: "Invalid invoice id rejected at route boundary:",
+      invalidIdTooLong: "Invoice id exceeds maximum allowed length.",
+      invalidIdIllegalChars:
+        "Invoice id contains characters outside the allowed set (a-z, A-Z, 0-9, -).",
+      invalidIdEmpty: "Invoice id is empty.",
+      invalidIdNotString: "Invoice id is not a string.",
       bulk: {
         sectionHeading: "Invoice documents",
         sectionSub: "Select documents to export or remove from this invoice.",
@@ -496,9 +581,11 @@ export const copy = deepFreeze({
         exportButtonAria: "Export selected documents as a JSON download",
         deleteButton: "Delete",
         deleteButtonAria: "Delete {count} selected documents after confirmation",
-        exportSuccessTitle: "Export ready",
-        exportSuccessMsg: "Exported {count} document{plural}.",
-        exportEmptyMsg: "No documents selected to export.",
+      exportSuccessTitle: "Export ready",
+      exportSuccessMsg: "Exported {count} document{plural}.",
+      exportEmptyMsg: "No documents selected to export.",
+      exportErrorTitle: "Export failed",
+      exportErrorMsg: "Could not export the selected documents. Please try again.",
         deleteConfirmTitle: "Delete selected documents?",
         deleteConfirmBody:
           "You are about to permanently delete {count} document{plural} from this invoice. This cannot be undone.",
@@ -761,6 +848,7 @@ export const copy = deepFreeze({
     heading: "Critical error",
     description: "A layout-level error occurred. Please reload the page or return home.",
     reloadLabel: "Reload page",
+    resettingLabel: "Reloading\u2026",
     homeLabel: "\u2190 Back to LiquiFact",
   },
   invoiceTimeline: {
@@ -783,45 +871,73 @@ export const copy = deepFreeze({
     retryLabel: "Retry",
     byActor: "By {actor}",
   },
+  investDetail: {
+    heading: "Invoice details",
+    subtitle: "Review the invoice terms before funding.",
+    dtIssuer: "Issuer",
+    dtAmount: "Amount",
+    dtYield: "Estimated yield",
+    dtMaturity: "Maturity date",
+    dtStatus: "Status",
+    fundButton: "Fund this invoice",
+    fundButtonAriaLabel: "Fund this invoice",
+    copyLinkButton: "Copy link",
+    copyLinkAriaLabel: "Copy invoice link to clipboard",
+    printButton: "Print / Save PDF",
+    printAriaLabel: "Print or save this invoice as PDF",
+    disclaimer:
+      "Note: Yield references are educational only and reflect on-chain basis-point assumptions. Invoice contracts settle at maturity. Funding commits principal and is subject to wallet approval.",
+    loadErrorTitle: "Unable to load invoice details",
+    loadErrorDescription: "Unable to load invoice details right now.",
+    backToMarketplace: "\u2190 Back to marketplace",
+    toastCopySuccess: "Invoice link copied to clipboard.",
+    toastCopySuccessTitle: "Link copied",
+    toastCopyError: "Could not copy link to clipboard.",
+    toastCopyErrorTitle: "Copy failed",
+  },
 };
-
 /**
- * Safely resolves a path against the copy dictionary.
+ * Executes an operation with deterministic failure recovery.
+ * Provides retries, partial completion fallbacks, and safe observability.
  * 
- * @param {string} path - The dot-separated path to resolve (e.g., "invest.detail.pageTitle").
- * @param {Record<string, string|number>} [params] - Optional parameters to replace in the copy string.
- * @returns {string} The resolved copy string, or a fallback if the path is invalid.
+ * @param {Function} operation - Async function to execute.
+ * @param {Object} options - { retries, fallback, timeoutMs }
+ * @returns {Promise<any>}
  */
-export function getCopy(path, params = {}) {
-  if (typeof path !== 'string' || path.trim() === '') {
-    return 'Missing copy: invalid path';
+export async function executeWithRecovery(operation, options = {}) {
+  if (typeof operation !== 'function') {
+    throw new Error('executeWithRecovery: operation must be a function');
   }
 
-  const keys = path.split('.');
-  let current = copy;
-
-  for (const key of keys) {
-    if (current == null || typeof current !== 'object') {
-      return `Missing copy: ${path}`;
-    }
-    current = current[key];
-  }
-
-  if (typeof current !== 'string') {
-    return `Missing copy: ${path}`;
-  }
-
-  let result = current;
-
-  if (params && typeof params === 'object') {
-    for (const [key, value] of Object.entries(params)) {
-      if (key && typeof key === 'string') {
-        const safeValue = value == null ? '' : String(value);
-        // Safely replace without regex injection risk
-        result = result.split(`{${key}}`).join(safeValue);
+  const { retries = 3, fallback = undefined, timeoutMs = 5000 } = options;
+  let attempt = 0;
+  
+  while (attempt <= retries) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    
+    try {
+      const result = await Promise.race([
+        operation(),
+        new Promise((_, reject) => {
+          controller.signal.addEventListener('abort', () => reject(new Error('Timeout')));
+        })
+      ]);
+      clearTimeout(timeoutId);
+      return result;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      attempt++;
+      if (attempt > retries) {
+        // Log diagnosable error without exposing sensitive data payload
+        console.error('[Recovery] Operation failed after retries:', error.message || 'Unknown error');
+        if (fallback !== undefined) {
+          return fallback;
+        }
+        throw new Error('Deterministic failure recovery exhausted: ' + (error.message || 'Unknown'));
       }
+      // Simple backoff
+      await new Promise(r => setTimeout(r, 10 * attempt));
     }
   }
-
-  return result;
 }

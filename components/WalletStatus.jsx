@@ -284,7 +284,15 @@ export default function WalletStatus() {
         break;
 
       case WALLET_STATES.NO_WALLET:
-        openTrustedWalletInstallUrl();
+        {
+          const url = copy.wallet.installWalletUrl;
+          // Keep navigation bound to the canonical trusted destination.
+          if (url === TRUSTED_WALLET_INSTALL_URL) {
+            window.open(TRUSTED_WALLET_INSTALL_URL, "_blank", "noopener,noreferrer");
+          } else {
+            console.error("Blocked attempt to open an untrusted wallet URL.");
+          }
+        }
         break;
 
       default:
