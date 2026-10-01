@@ -218,6 +218,38 @@ export const MOCK_SETTINGS = [
 
 // DEV-only delay (ms) to keep the load-more cycle perceptible in dev.
 const DEV_DELAY = process.env.NODE_ENV === "development" ? 80 : 0;
+const SETTING_FIELDS = ["id", "category", "label", "type", "value", "description"];
+
+// This shared fixture is read-only; callers that edit settings must own their state copy.
+for (const setting of MOCK_SETTINGS) Object.freeze(setting);
+Object.freeze(MOCK_SETTINGS);
+
+function validateSettingsOverride(settings) {
+  if (!Array.isArray(settings)) {
+    throw new TypeError("Settings test override must be an array.");
+  }
+
+  const ids = new Set();
+  for (const [index, setting] of settings.entries()) {
+    if (!setting || typeof setting !== "object" || Array.isArray(setting)) {
+      throw new TypeError(`Settings test override row ${index} must be an object.`);
+    }
+
+    for (const field of SETTING_FIELDS) {
+      if (typeof setting[field] !== "string") {
+        throw new TypeError(`Settings test override row ${index} has an invalid ${field} field.`);
+      }
+    }
+
+    if (["id", "category", "label", "type"].some((field) => !setting[field].trim())) {
+      throw new TypeError(`Settings test override row ${index} has an empty required field.`);
+    }
+    if (ids.has(setting.id)) {
+      throw new TypeError(`Settings test override contains a duplicate id at row ${index}.`);
+    }
+    ids.add(setting.id);
+  }
+}
 
 // Deep-freeze MOCK_SETTINGS items and array to preserve fixture immutability
 // across concurrent consumers and prevent accidental mutation bugs.
