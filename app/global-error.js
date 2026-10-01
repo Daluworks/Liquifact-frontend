@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { reportError } from "../lib/observability/reportError";
 import { copy } from "./copy/en";
@@ -45,6 +45,40 @@ import { copy } from "./copy/en";
  *   absent or non-function in edge cases.
  */
 export default function GlobalLayoutError({ error, reset }) {
+  // ── Concurrency guard refs ────────────────────────────────────────────────
+  /**
+   * Synchronous guard: set to `true` before calling `reset()`, never cleared
+   * inside this component's lifetime.  Using a ref (not state) ensures the
+   * write is immediately visible to the *next* click event handler even before
+   * React has scheduled a re-render.
+   * @type {React.MutableRefObject<boolean>}
+   */
+  const isResettingRef = useRef(false);
+
+  /**
+   * Set to `false` in the effect cleanup so any async reporter continuation
+   * knows the component has unmounted.
+   * @type {React.MutableRefObject<boolean>}
+   */
+  const isMountedRef = useRef(true);
+
+  /**
+   * Tracks the last error instance we have already forwarded to `reportError`
+   * so Strict Mode double-effects and prop-identity-preserving re-renders do
+   * not emit duplicate telemetry events.
+   * @type {React.MutableRefObject<Error|null>}
+   */
+  const reportedErrorRef = useRef(null);
+
+  // ── Rendering state ───────────────────────────────────────────────────────
+  /**
+   * Mirrors `isResettingRef` for React rendering so the button can be visually
+   * disabled.  We write the ref first (synchronous guard) then call setState
+   * for the deferred visual update.
+   */
+  const [isResetting, setIsResetting] = useState(false);
+
+  // ── Error reporting — idempotent, post-unmount safe ───────────────────────
   useEffect(() => {
     // Invariant: reportError must not crash the boundary even if `error` or
     // the observability reporter is invalid. The try/catch is a belt-and-
