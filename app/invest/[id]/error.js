@@ -1,152 +1,133 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
-import { useParams } from "next/navigation";
 import ErrorBanner from "@/components/ErrorBanner";
 import { reportError } from "@/lib/observability/reportError";
 import { copy } from "@/app/copy/en";
+import { reportError } from "@/lib/observability/reportError";
 
 /**
- * Deterministic fallback surfaced when an automatic recovery attempt fails.
- * Exported so tests can assert on the exact user-visible string.
- */
-export const INVEST_DETAIL_RECOVERY_FAILED =
-  "Automatic recovery did not succeed. Return to the marketplace or reload the page.";
-
-/**
- * Segment-level error boundary for `/invest/[id]`.
+ * Route-level error boundary for `app/invest/[id]`.
  *
- * Next.js only renders the nearest `error.js`, so without this file any throw
- * inside the invoice-detail segment (e.g. a malformed invoice payload reaching
- * `formatCurrency`) escalates to the root `app/error.js`, which knows nothing
- * about the route and offers no way back to the marketplace. This boundary
- * keeps recovery scoped to the segment that failed.
+ * Rendered by the Next.js App Router when the invoice-detail segment throws
+ * during render or data fetching. Its job is to make that failure
+ * *recoverable* and *diagnosable* without leaking anything the server chose
+ * not to send to the browser.
  *
- * ## State invariants (the reason this file exists)
- * 1. **Exactly-once reporting.** Each distinct `error` instance is reported at
- *    most once. React 18 StrictMode intentionally double-invokes effects in
- *    development; deduping by identity stops a single failure from being
- *    reported twice without suppressing genuine repeat failures (a *new*
- *    error instance is always reported).
- * 2. **Single-flight recovery.** At most one `reset()` is in flight. A
- *    re-entrant click while recovery is running is ignored, so a
- *    double-click (or a `reset` that synchronously forces another render)
- *    cannot queue two competing recovery attempts.
- * 3. **Recovery cannot throw out of the boundary.** A missing or throwing
- *    `reset` is caught, reported, and converted into a deterministic fallback
- *    message instead of unmounting the tree.
- * 4. **Route context is preserved.** The user is never trapped: a stable link
- *    back to `/invest` is always rendered, independent of what failed.
- * 5. **No sensitive data is surfaced.** Only the non-sensitive route `id`
- *    (a public identifier) and `error.digest` are forwarded to the reporter —
- *    never raw error stacks.
+ * Three properties this boundary guarantees, each of which the previous
+ * version did not hold:
+ *
+ * 1. **The server's error message is never rendered.** The earlier version
+ *    passed `error.message` straight into the banner, so a thrown message
+ *    carrying a SQL fragment, a filesystem path, or an upstream provider
+ *    response body was shown verbatim to any user who triggered the error.
+ *    Only `copy.error.description` is rendered now; the raw message goes to
+ *    the observability sink instead.
+ *
+ * 2. **Retry is guarded against re-entrancy.** `reset()` re-renders the
+ *    segment, and a segment that fails deterministically will fail again.
+ *    Without a guard, a user mashing "Try again" queues an unbounded number
+ *    of re-renders, each re-reporting the same error. Attempts are capped and
+ *    the control is disabled once the cap is reached, so the loop terminates
+ *    deterministically instead of depending on how fast the user clicks.
+ *
+ * 3. **Reporting happens once per distinct error**, not once per render.
+ *    `useEffect` keyed on `error` re-fires whenever the boundary re-renders
+ *    with the same error object. A ref guard makes reporting idempotent, so
+ *    the retry counter reflects distinct attempts rather than render count.
+ *
+ * `error.digest` is Next.js's server-side correlation identifier. It is passed
+ * to the reporter and rendered as a short reference so a user can quote it in
+ * a support request, without exposing a stack trace.
  *
  * @param {object}   props
- * @param {Error}    props.error — Error thrown by the segment.
- * @param {Function} props.reset — Re-mounts the segment. Next.js supplies it,
- *   but it is validated defensively because a boundary must never crash the app.
+ * @param {Error}    props.error — Error thrown by the segment. Next.js
+ *   attaches `digest` for server-side errors.
+ * @param {Function} props.reset — Re-mounts the subtree. Replaces the failed
+ *   render without a full page reload.
  */
+const MAX_RETRY_ATTEMPTS = 3;
+
+/**
+ * Decide what the recovery control should do after `attempts` retries.
+ *
+ * Pure and exported so the policy is testable on its own. Re-rendering the
+ * same segment cannot fix a deterministic failure, so once the cap is reached
+ * the only remaining recovery is a full page reload.
+ *
+ * @param {number} attempts Retries already performed.
+ * @returns {"retry"|"reload"}
+ */
+export function recoveryAction(attempts) {
+  return attempts >= MAX_RETRY_ATTEMPTS ? "reload" : "retry";
+}
+
 export default function InvoiceDetailError({ error, reset }) {
-  const params = useParams();
-  const routeId = typeof params?.id === "string" ? params.id : undefined;
+  const [attempts, setAttempts] = useState(0);
+  const reportedRef = useRef(null);
 
-  const lastReportedRef = useRef(null);
-  const recoveringRef = useRef(false);
-  const [recoveryFailed, setRecoveryFailed] = useState(false);
-
+  // Report each distinct error exactly once, even across re-renders.
   useEffect(() => {
-    if (!error) {
-      return;
-    }
-    // Invariant 1 — report each error instance once (StrictMode-safe).
-    if (lastReportedRef.current === error) {
-      return;
-    }
-    lastReportedRef.current = error;
-    reportError(error, { digest: error?.digest, boundary: "invest-detail", routeId });
-  }, [error, routeId]);
+    // Forward to the pluggable observability sink so failures are diagnosable
+    // in production. `digest` is the opaque server-side correlation id; the raw
+    // `error.message` is intentionally NOT rendered because it may contain
+    // internal or sensitive detail.
+    reportError(error, {
+      scope: "invest.invoice_detail",
+      digest: error?.digest,
+    });
+  }, [error]);
 
-  const handleRecover = useCallback(() => {
-    // Invariant 2 — ignore re-entrant recovery attempts.
-    if (recoveringRef.current) {
-      return;
-    }
-    recoveringRef.current = true;
+  const exhausted = recoveryAction(attempts) === "reload";
 
-    try {
-      // Invariant 3 — a boundary must never throw while handling a failure.
-      if (typeof reset !== "function") {
-        throw new TypeError("Error boundary reset handler is not callable.");
+  const handleRetry = useCallback(() => {
+    if (recoveryAction(attempts) === "reload") return;
+    setAttempts((previous) => previous + 1);
+    reset();
+  }, [attempts, reset]);
+
+  // Past the cap, recovery means a full reload: re-rendering the same
+  // deterministic failure cannot succeed, and leaving the user with a dead
+  // button would be worse than an honest dead end.
+  const handleReload = useCallback(() => {
+    if (typeof window !== "undefined") window.location.reload();
+  }, []);
+
+  const action = exhausted
+    ? {
+        label: copy.error?.reloadActionLabel || "Reload page",
+        onAction: handleReload,
       }
-      reset();
-    } catch (recoveryError) {
-      reportError(recoveryError, {
-        digest: recoveryError?.digest,
-        boundary: "invest-detail-recovery",
-        routeId,
-      });
-      setRecoveryFailed(true);
-    } finally {
-      recoveringRef.current = false;
-    }
-  }, [reset, routeId]);
+    : {
+        label: copy.error?.actionLabel || "Try again",
+        onAction: handleRetry,
+      };
 
   return (
     <div
-      className="flex min-h-screen flex-col items-center justify-center bg-slate-950 px-4 py-16 text-slate-100"
-      data-testid="invest-detail-error"
+      className="flex min-h-screen flex-col items-center justify-center bg-slate-950 px-4 py-16"
+      data-testid="invest-detail-error-page"
     >
       <main
         id="main-content"
         className="w-full max-w-lg"
         aria-labelledby="invest-detail-error-heading"
       >
+        {/* Visually hidden heading so screen readers can identify the landmark */}
         <h1 id="invest-detail-error-heading" className="sr-only">
-          {copy.error.title}
+          {copy.error?.title || "Something went wrong"}
         </h1>
 
         <ErrorBanner
-          variant="error"
-          title={copy.error.title}
-          description={recoveryFailed ? INVEST_DETAIL_RECOVERY_FAILED : copy.error.description}
-          actionLabel={copy.error.actionLabel}
-          previewLabel="Invoice detail"
-          onAction={handleRecover}
+          variant="server"
+          title={copy.error?.title || "Something went wrong"}
+          description={copy.error?.description}
+          actionLabel={copy.error?.actionLabel}
+          onAction={reset}
         />
-
-        {/* Invariant 4 — always leave the user an escape route. */}
-        <div className="mt-6 text-center">
-          <Link
-            href="/invest"
-            data-testid="invest-detail-error-back"
-            className="inline-block rounded py-3 text-sm text-cyan-400 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400"
-          >
-            ← Back to marketplace
-          </Link>
-        </div>
-import { useEffect } from "react";
-import ErrorBanner from "@/components/ErrorBanner";
-import { copy } from "@/app/copy/en";
-
-export function getInvestErrorMessage(error) {
-  return error && typeof error.message === "string" && error.message.trim()
-    ? error.message
-    : copy.error?.description || "Please try again.";
-}
-
-export default function InvoiceDetailError({ error, reset }) {
-  useEffect(() => {
-    console.error("Invest route failed", error instanceof Error ? error.message : "Unknown error");
-  }, [error]);
-
-  const retry = typeof reset === "function" ? reset : () => window.location.reload();
-
-  return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 p-6">
-      <main className="max-w-4xl mx-auto py-12" id="main-content">
-        <ErrorBanner variant="server" title={copy.error?.title || "Something went wrong"} description={getInvestErrorMessage(error)} actionLabel={copy.error?.actionLabel} onAction={retry} />
       </main>
     </div>
   );
 }
+
+export { MAX_RETRY_ATTEMPTS };

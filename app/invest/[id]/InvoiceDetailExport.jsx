@@ -117,10 +117,44 @@ export function toExportRecord(invoice) {
     yield: invoice.yield,
     status: invoice.status,
   };
+
+  return record;
+}
+
+/**
+ * Debounce utility to prevent rapid consecutive function calls.
+ * Ensures only the last call within the delay window executes.
+ *
+ * @param {Function} func - Function to debounce
+ * @param {number} delay - Delay in milliseconds
+ * @returns {Function} - Debounced function
+ */
+function useDebounce(func, delay) {
+  const timeoutRef = useRef(null);
+
+  return useCallback(
+    (...args) => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+
+      timeoutRef.current = setTimeout(() => {
+        func(...args);
+        timeoutRef.current = null;
+      }, delay);
+    },
+    [func, delay]
+  );
 }
 
 /**
  * InvoiceDetailExport — CSV/JSON download buttons for a single invoice.
+ *
+ * Features concurrent execution safety:
+ * - Loading state prevents multiple simultaneous exports
+ * - Debounced clicks prevent duplicate exports
+ * - Error handling with user feedback
+ * - Input validation before export
  *
  * @param {object} props
  * @param {object|null} [props.invoice] - The invoice object to export
