@@ -101,6 +101,11 @@
  * @property {string} invest.detail.inlineEdit.errorRequired
  * @property {string} invest.detail.inlineEdit.announceSaved
  * @property {string} invest.detail.inlineEdit.announceCancelled
+ * @property {string} invest.detail.invalidIdLogPrefix
+ * @property {string} invest.detail.invalidIdTooLong
+ * @property {string} invest.detail.invalidIdIllegalChars
+ * @property {string} invest.detail.invalidIdEmpty
+ * @property {string} invest.detail.invalidIdNotString
  * @property {Object} invest.detail.bulk - Bulk-select toolbar copy for invoice detail documents
  * @property {Object} invoices - Invoices page copy
  * @property {string} invoices.title
@@ -457,6 +462,14 @@ export const copy = {
         announceSaved: "{field} updated successfully.",
         announceCancelled: "Edit cancelled.",
       },
+      // Strings used when the route parameter id fails validation.
+      // These appear in server logs and observability tooling, not in the
+      // rendered UI (the user sees the not-found page instead).
+      invalidIdLogPrefix: "Invalid invoice id rejected at route boundary:",
+      invalidIdTooLong: "Invoice id exceeds maximum allowed length.",
+      invalidIdIllegalChars: "Invoice id contains characters outside the allowed set (a-z, A-Z, 0-9, -).",
+      invalidIdEmpty: "Invoice id is empty.",
+      invalidIdNotString: "Invoice id is not a string.",
       bulk: {
         sectionHeading: "Invoice documents",
         sectionSub: "Select documents to export or remove from this invoice.",
