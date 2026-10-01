@@ -2,13 +2,21 @@
 
 import { useRef, useState, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { useCallback, useRef, useState, useEffect } from "react";
+import { useReducer, useRef, useEffect } from "react";
 import NavMenu from "../components/NavMenu";
 import { copy } from "./copy/en";
 import { getHealth } from "../lib/api/health";
 import { env } from "../lib/config/env";
 import { extractKnownFields, safeJsonStringify } from "../lib/format/safeJson";
 import HealthStatusSkeleton from "../components/HealthStatusSkeleton";
+import {
+  healthReducer,
+  initialHealthState,
+  normalizeHealthResult,
+  classifyFailure,
+  STATUS,
+  FAILURE_REASON,
+} from "../lib/health/healthState";
 
 const API_URL = env.apiUrl;
 
@@ -84,123 +92,74 @@ const getStatusConfig = (status) => {
   }
 };
 
+const TERMINAL_STATUSES = new Set([STATUS.CONNECTED, STATUS.DEGRADED, STATUS.UNREACHABLE]);
+
 /**
- * Sanitises a health result object before it is placed into component state.
- *
- * Invariants enforced:
- *  - `status` is normalised to STATUS_ALLOWLIST (unknown → "unreachable").
- *  - `message` is capped at MESSAGE_MAX_LEN characters.
- *  - All other fields are forwarded as-is (safeJsonStringify bounds the raw
- *    payload in the collapsible section; extractKnownFields + truncateString
- *    bound individual field values in the structured summary).
- *
- * @param {object} result - Raw result from getHealth.
- * @returns {object} Sanitised result safe for storage and rendering.
+ * State invariants (see lib/health/healthState.js for the full list):
+ *  - Only one health request is in flight at a time (synchronous ref guard + reducer guard).
+ *  - A result is applied only if it belongs to the current request (requestId match).
+ *  - Results are normalized, so `health.status` is always a known status and
+ *    `health.message` is always a string.
+ *  - A thrown error always ends in "unreachable"; it never leaves a stale result on screen.
+ *  - No state updates after unmount; the in-flight request is aborted on unmount.
  */
-export function sanitizeHealthResult(result) {
-  if (!result || typeof result !== "object") {
-    return { status: "unreachable", message: "Invalid response received." };
-  }
-
-  const status = normalizeStatus(result.status);
-  const message =
-    typeof result.message === "string"
-      ? truncateString(result.message, MESSAGE_MAX_LEN)
-      : "";
-
-  return { ...result, status, message };
-}
-
 export default function Home() {
-  const [health, setHealth] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
+  const [state, dispatch] = useReducer(healthReducer, initialHealthState);
   const abortRef = useRef(null);
-  // Monotoonic request id ensures only the latest in-flight request can
-  // commit state. Guards against out-of-order resolution when a previous
-  // request's abort races with a new request's resolution.
-  const requestIdRef = useRef(0);
-  // Tracks mounted state so late resolutions after unmount do not call
-  // setState (avoids React warnings and stale updates).
+  const inFlightRef = useRef(false);
   const mountedRef = useRef(true);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      // Bump the request id so any in-flight resolution is treated as stale.
-      requestIdRef.current += 1;
       abortRef.current?.abort();
       abortRef.current = null;
     };
   }, []);
 
-  /**
-   * Initiates a health-check request.
-   *
-   * ## Concurrent-execution guard
-   * `loading` is checked at the top of the callback: if a check is already
-   * in-flight, the call is a no-op. This prevents double-submission if
-   * `checkApi` is called programmatically while the button is already disabled
-   * (e.g., via keyboard events that bypass the `disabled` attribute, automation
-   * scripts, or React testing utilities that fire events programmatically).
-   *
-   * The AbortController pattern ensures that:
-   *  1. A previous in-flight request is aborted before a new one starts.
-   *  2. The component-unmount cleanup aborts any pending request.
-   *  3. An AbortError is silently swallowed so it does not surface as an error.
-   *
-   * ## Validation boundary
-   * The raw result from `getHealth` is passed through `sanitizeHealthResult`
-   * before being stored in state. This ensures:
-   *  - `status` is always one of ["connected", "degraded", "unreachable"].
-   *  - `message` is capped at MESSAGE_MAX_LEN characters.
-   *
-   * @returns {Promise<void>}
-   */
-  const checkApi = useCallback(async () => {
-    // Reentrance guard: a check is already running — ignore this call.
-    if (loading) return;
+  const loading = state.status === STATUS.LOADING;
 
-    abortRef.current?.abort();
+  // Same shape the render code always used: { status, message, details?, ... }
+  const health = TERMINAL_STATUSES.has(state.status)
+    ? { message: "", ...(state.payload || {}), status: state.status }
+    : null;
+
+  const checkApi = async () => {
+    // Synchronous guard: two clicks in the same tick cannot start two requests.
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+
+    // Matches the id the reducer assigns on START (state.requestId + 1).
+    const requestId = state.requestId + 1;
     const controller = new AbortController();
     abortRef.current = controller;
-    const requestId = ++requestIdRef.current;
+    dispatch({ type: "START" });
 
-    setError(null);
-    setLoading(true);
+    const send = (action) => {
+      if (mountedRef.current && !controller.signal.aborted) {
+        dispatch({ ...action, requestId });
+      }
+    };
+
     try {
       const result = await getHealth(API_URL, { signal: controller.signal });
-      if (controller.signal.aborted) return;
+      const payload = normalizeHealthResult(result);
 
-      // Validation boundary: normalise status and cap message length before
-      // storing in state so the render tree never sees attacker-controlled values.
-      setHealth(sanitizeHealthResult(result));
+      if (payload.status === STATUS.CONNECTED) {
+        send({ type: "SUCCESS", payload });
+      } else if (payload.status === STATUS.DEGRADED) {
+        send({ type: "DEGRADED", payload });
+      } else {
+        send({ type: "FAILURE", reason: FAILURE_REASON.NETWORK, payload });
+      }
     } catch (err) {
-      // Aborted requests are expected during supersession/unmount; swallow
-      // them. Any other error is also ignored for state purposes but we
-      // still avoid clobbering newer requests.
-      if (err?.name === "AbortError") return;
-      // Only surface errors for the latest, mounted request so a stale
-      // failure cannot overwrite a newer success.
-      if (
-        requestId !== requestIdRef.current ||
-        !mountedRef.current ||
-        controller.signal.aborted
-      ) {
-        return;
-      }
-      setError(err);
+      if (err?.name === "AbortError") return; // unmount abort: nothing to render
+      // Never leave a stale result or an endless spinner; store a safe code only.
+      send({ type: "FAILURE", reason: classifyFailure(err) });
     } finally {
-      // Only clear loading if this is still the active request and the
-      // component is mounted; otherwise a newer request owns the flag.
-      if (
-        requestId === requestIdRef.current &&
-        mountedRef.current &&
-        !controller.signal.aborted
-      ) {
-        setLoading(false);
-      }
+      inFlightRef.current = false;
+      if (abortRef.current === controller) abortRef.current = null;
     }
   }, [loading]);
 
