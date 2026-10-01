@@ -31,7 +31,6 @@ import StatusPill from "@/components/StatusPill";
 import InvoiceTimeline from "@/components/InvoiceTimeline";
 import { copy } from "@/app/copy/en";
 import { INVALID_VALUE_FALLBACK, formatCurrency, formatAmount } from "@/lib/format/currency";
-import { isValidInvoiceId } from "@/lib/validation/invoiceId";
 import { getInvoiceById } from "../lib";
 import FundActions from "./FundActions";
 import { RouteFocus } from "./FocusManager";
@@ -125,16 +124,6 @@ export default async function InvoiceDetailPage({ params, searchParams }) {
   // Support both the current (sync object) and future (Promise) params shape.
   const { id } = await Promise.resolve(params);
   const backHref = getMarketplaceHref(searchParams || {});
-
-  // ── Validation boundary ────────────────────────────────────────────────────
-  // Reject structurally invalid ids before they reach any data layer.
-  // An invalid id (empty, too long, illegal characters) produces a 404
-  // rather than an unhandled lookup against the data layer with garbage input.
-  // This is the single enforcement point for route-parameter safety on this
-  // page; all downstream helpers can assume `id` is a well-formed string.
-  if (!isValidInvoiceId(id)) {
-    notFound();
-  }
 
   const invoice = getInvoiceById(id);
 

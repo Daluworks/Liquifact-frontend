@@ -54,28 +54,36 @@ jest.mock("next/navigation", () => ({
 }));
 
 // ── Stub out client-boundary sub-components ────────────────────────────────────
-jest.mock("@/components/NavMenu", () =>
-  function NavMenuStub() {
-    return <nav data-testid="nav-menu-stub" />;
-  }
+jest.mock(
+  "@/components/NavMenu",
+  () =>
+    function NavMenuStub() {
+      return <nav data-testid="nav-menu-stub" />;
+    }
 );
 
-jest.mock("@/components/StatusPill", () =>
-  function StatusPillStub({ status }) {
-    return <span data-testid="status-pill-stub">{status}</span>;
-  }
+jest.mock(
+  "@/components/StatusPill",
+  () =>
+    function StatusPillStub({ status }) {
+      return <span data-testid="status-pill-stub">{status}</span>;
+    }
 );
 
-jest.mock("@/components/InvoiceTimeline", () =>
-  function InvoiceTimelineStub() {
-    return <div data-testid="invoice-timeline-stub" />;
-  }
+jest.mock(
+  "@/components/InvoiceTimeline",
+  () =>
+    function InvoiceTimelineStub() {
+      return <div data-testid="invoice-timeline-stub" />;
+    }
 );
 
-jest.mock("./InvoiceDetailClient", () =>
-  function InvoiceDetailClientStub({ summaryHeading }) {
-    return <div data-testid="invoice-detail-client-stub">{summaryHeading}</div>;
-  }
+jest.mock(
+  "./InvoiceDetailClient",
+  () =>
+    function InvoiceDetailClientStub({ summaryHeading }) {
+      return <div data-testid="invoice-detail-client-stub">{summaryHeading}</div>;
+    }
 );
 
 jest.mock("./InvoiceDetailItems", () => {
@@ -89,16 +97,20 @@ jest.mock("./InvoiceDetailItems", () => {
   };
 });
 
-jest.mock("./InvoiceDetailExport", () =>
-  function InvoiceDetailExportStub() {
-    return <div data-testid="invoice-detail-export-stub" />;
-  }
+jest.mock(
+  "./InvoiceDetailExport",
+  () =>
+    function InvoiceDetailExportStub() {
+      return <div data-testid="invoice-detail-export-stub" />;
+    }
 );
 
-jest.mock("./FundActions", () =>
-  function FundActionsStub() {
-    return <div data-testid="fund-actions-stub" />;
-  }
+jest.mock(
+  "./FundActions",
+  () =>
+    function FundActionsStub() {
+      return <div data-testid="fund-actions-stub" />;
+    }
 );
 
 jest.mock("./FocusManager", () => ({
@@ -148,9 +160,9 @@ describe("InvoiceDetailPage — valid known ids (accept)", () => {
     const result = await invokePageWithId("inv-001");
     const { container } = render(result.element);
     // InvoiceDetailClientStub renders the summaryHeading prop as text
-    expect(
-      container.querySelector('[data-testid="invoice-detail-client-stub"]')
-    ).toHaveTextContent("Acme Supplies Ltd");
+    expect(container.querySelector('[data-testid="invoice-detail-client-stub"]')).toHaveTextContent(
+      "Acme Supplies Ltd"
+    );
   });
 
   it("page renders with the expected page title heading", async () => {
@@ -218,7 +230,9 @@ describe("InvoiceDetailPage — invalid ids (validation boundary)", () => {
     });
 
     it("calls notFound() for an id with a null byte", async () => {
-      expect((await invokePageWithId("inv" + String.fromCharCode(0) + "001")).notFoundCalled).toBe(true);
+      expect((await invokePageWithId("inv" + String.fromCharCode(0) + "001")).notFoundCalled).toBe(
+        true
+      );
     });
 
     it("calls notFound() for an id with angle brackets (XSS probe)", async () => {
