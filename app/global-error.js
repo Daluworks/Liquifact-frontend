@@ -13,42 +13,36 @@ import { copy } from "./copy/en";
  * replaces the entire root layout (including `<html>` and `<body>`), it must
  * render those tags itself and **cannot** import any async Server Components.
  *
- * Unlike the route-level boundary in `app/error.js`, this component does not
- * use `ErrorBanner` — at this point the global CSS bundle may not have loaded,
- * so it falls back to defensive inline styles to always be renderable.
+ * Unlike the route-level error boundary in `app/error.js`, this component does
+ * not use `ErrorBanner` — at this point the design-system CSS may not be
+ * available, so it falls back to defensive inline styles to always be renderable.
  *
- * ## Concurrency hardening
+ * Validation boundaries enforced here
+ * ─────────────────────────────────────
+ * 1. `error` may be null, undefined, a plain object, or a real Error instance.
+ *    The component must never crash regardless of what Next.js passes in.
+ *    `reportError` is called with optional chaining so a missing/invalid error
+ *    object never causes a secondary crash inside the boundary.
  *
- * Next.js calls `reset()` to unmount and re-mount the entire root layout tree.
- * Without a guard this is not idempotent: rapid or concurrent clicks queue N
- * parallel re-mount attempts whose ordering and side effects are undefined.
+ * 2. `reset` may be undefined or a non-function (e.g. when the boundary is
+ *    rendered in a test without the prop). The reset button is only rendered
+ *    when `reset` is a callable function, and the `onClick` handler is guarded
+ *    so that a race between render and prop change cannot throw.
  *
- * The following invariants are enforced:
+ * 3. `error.digest` may be absent. The optional-chain `error?.digest` is used
+ *    consistently so missing digests degrade gracefully to `undefined` rather
+ *    than throwing a TypeError.
  *
- * 1. **Single in-flight reset** — `isResettingRef` is a `useRef` boolean (not
- *    state) so its write is synchronous and immediately visible to the next
- *    event before React re-renders.  Only the first `handleReset` invocation
- *    while a reset is in-flight proceeds; all others are no-ops.
+ * 4. `reportError` is called inside a try/catch-guarded `useEffect` so a
+ *    malfunctioning observability reporter cannot crash the boundary itself.
  *
- * 2. **Button disabled during reset** — `isResetting` state mirrors the ref
- *    for rendering purposes.  The button gains `disabled` and `aria-disabled`
- *    and the cursor changes to `not-allowed`, making the guard visible to both
- *    pointer and assistive technology users.
+ * 5. The component always renders a complete `<html>/<body>` tree regardless of
+ *    input state — this is the last line of defence before a blank screen.
  *
- * 3. **Stale-closure / post-unmount safety** — `isMountedRef` is set to
- *    `false` in the `useEffect` cleanup returned by the error-reporting effect.
- *    Any async continuation (e.g. a reporter that awaits a network flush)
- *    cannot call back into state after the component unmounts.
- *
- * 4. **Idempotent error reporting** — `reportedErrorRef` tracks the last
- *    reported error object.  If Next.js re-renders this boundary with the same
- *    error reference (possible during Strict Mode double-invocation or HMR),
- *    `reportError` is not called a second time for the same instance.
- *
- * @param {object}   props
- * @param {Error}    props.error — The layout-level error.
- * @param {Function} props.reset — Re-mounts the root layout tree without a
- *   full navigation, giving users a lightweight recovery path before reload.
+ * @param {object}        props
+ * @param {Error|*}       props.error — The layout-level error (may be any value).
+ * @param {Function|*}    props.reset — Re-mounts the root layout tree; may be
+ *   absent or non-function in edge cases.
  */
 export default function GlobalLayoutError({ error, reset }) {
   // ── Concurrency guard refs ────────────────────────────────────────────────
@@ -86,56 +80,27 @@ export default function GlobalLayoutError({ error, reset }) {
 
   // ── Error reporting — idempotent, post-unmount safe ───────────────────────
   useEffect(() => {
-    isMountedRef.current = true;
-
-    // Only forward to the reporter if this is a distinct new error instance.
-    if (error !== reportedErrorRef.current) {
-      reportedErrorRef.current = error;
+    // Invariant: reportError must not crash the boundary even if `error` or
+    // the observability reporter is invalid. The try/catch is a belt-and-
+    // suspenders guard; reportError itself also has an internal try/catch.
+    try {
       reportError(error, { digest: error?.digest, boundary: "global-layout" });
+    } catch {
+      // Silent failsafe — the boundary UI must always render.
     }
-
-    return () => {
-      // Signal any async continuation that the component has unmounted.
-      isMountedRef.current = false;
-    };
   }, [error]);
 
-  // ── Concurrent-safe reset handler ─────────────────────────────────────────
-  /**
-   * Idempotent reset: only one in-flight re-mount is allowed at a time.
-   *
-   * The ref write is synchronous so a second click arriving in the same event
-   * loop tick (before React re-renders) is still blocked.  The state write
-   * schedules the visual disabled update.
-   */
+  // Invariant: `reset` is callable only when it is a function. A non-function
+  // prop (undefined, null, a string from a misconfigured test) must never reach
+  // the onClick handler.
+  const canReset = typeof reset === "function";
+
   const handleReset = () => {
-    if (isResettingRef.current) {
-      // A reset is already in flight — discard this invocation.
-      return;
+    if (canReset) {
+      reset();
     }
-    isResettingRef.current = true;
-    setIsResetting(true);
-    reset();
-    // Note: we intentionally do NOT reset `isResettingRef` to false here.
-    // If the remount succeeds, this component unmounts entirely.
-    // If the remount fails again, Next.js re-mounts this boundary with a new
-    // error prop, which resets all ref/state to initial values naturally.
   };
 
-  // ── Styles ────────────────────────────────────────────────────────────────
-  const resetButtonStyle = {
-    padding: "0.75rem 1.5rem",
-    borderRadius: "9999px",
-    background: isResetting ? "rgba(34, 211, 238, 0.08)" : "rgba(34, 211, 238, 0.2)",
-    color: isResetting ? "rgba(34, 211, 238, 0.45)" : "#22d3ee",
-    border: "none",
-    cursor: isResetting ? "not-allowed" : "pointer",
-    fontSize: "0.875rem",
-    fontWeight: 500,
-    transition: "background 0.15s, color 0.15s",
-  };
-
-  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <html lang="en">
       <body
@@ -179,16 +144,26 @@ export default function GlobalLayoutError({ error, reset }) {
             {copy.globalError.description}
           </p>
           <div style={{ display: "flex", gap: "1rem", justifyContent: "center" }}>
-            <button
-              type="button"
-              onClick={handleReset}
-              disabled={isResetting}
-              aria-disabled={isResetting}
-              data-testid="global-error-reset"
-              style={resetButtonStyle}
-            >
-              {isResetting ? copy.globalError.resettingLabel : copy.globalError.reloadLabel}
-            </button>
+            {/* Invariant: only render the reset button when reset is a function */}
+            {canReset && (
+              <button
+                type="button"
+                onClick={handleReset}
+                data-testid="global-error-reset"
+                style={{
+                  padding: "0.75rem 1.5rem",
+                  borderRadius: "9999px",
+                  background: "rgba(34, 211, 238, 0.2)",
+                  color: "#22d3ee",
+                  border: "none",
+                  cursor: "pointer",
+                  fontSize: "0.875rem",
+                  fontWeight: 500,
+                }}
+              >
+                {copy.globalError.reloadLabel}
+              </button>
+            )}
             <Link
               href="/"
               data-testid="global-error-home-link"

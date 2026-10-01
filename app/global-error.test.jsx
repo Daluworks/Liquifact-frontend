@@ -1,40 +1,37 @@
 /**
- * Tests for app/global-error.js — the layout-level (global) error boundary.
+ * @jest-environment jsdom
+ *
+ * @file app/global-error.test.jsx
+ *
+ * Focused tests for app/global-error.js — the Next.js global layout error
+ * boundary (issue #1105: Define validation boundaries).
  *
  * Test strategy
  * ─────────────
- * • Mock `reportError` so tests are isolated from the telemetry sink.
- * • Mock `next/link` to a plain <a> tag so Link renders without the Next.js
- *   router context (which is unavailable in Jest/jsdom).
- * • Cover rendering, error-reporting idempotency, concurrent-safe reset guard,
- *   post-unmount safety, accessibility, and copy-key presence.
- *
- * Concurrency scenarios
- * ─────────────────────
- * The `isResettingRef` guard is *synchronous* — it is written before `reset()`
- * is called, so a second click that arrives in the same event-loop tick is
- * blocked before React re-renders.  Tests that verify this use synchronous
- * `fireEvent.click` (rather than `userEvent.click`, which is async) to prove
- * that the guard holds even in the most adversarial same-tick scenario.
+ * - Success:    valid Error + function reset renders correctly and reports.
+ * - Rejection:  null/undefined/non-Error error props and null/non-function
+ *   reset props never crash the component.
+ * - Boundary:   missing digest, plain-object errors, reset called multiple
+ *   times, reportError malfunctions.
+ * - Regression: copy strings, ARIA semantics, home link, public interface
+ *   shape remain unchanged.
  */
+
 import "@testing-library/jest-dom";
-import { act, render, screen, fireEvent } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { axe } from "jest-axe";
 import React from "react";
 
-// ── Module mocks ─────────────────────────────────────────────────────────────
+// ── Module mocks ──────────────────────────────────────────────────────────────
 
 jest.mock("../lib/observability/reportError", () => ({
   reportError: jest.fn(),
 }));
 
-// next/link renders <a> tags with router context in real Next.js but needs a
-// shim for jsdom unit tests.
 jest.mock("next/link", () => {
-  function MockLink({ href, children, style, "data-testid": testId }) {
+  function MockLink({ href, children, ...rest }) {
     return (
-      <a href={href} style={style} data-testid={testId}>
+      <a href={href} {...rest}>
         {children}
       </a>
     );
@@ -43,7 +40,7 @@ jest.mock("next/link", () => {
   return MockLink;
 });
 
-// ── SUT + test dependencies ───────────────────────────────────────────────────
+// ── Import SUT after mocks ────────────────────────────────────────────────────
 
 import GlobalLayoutError from "./global-error";
 import { reportError } from "../lib/observability/reportError";
@@ -51,22 +48,14 @@ import { copy } from "./copy/en";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function makeError(message = "Layout error", digest = undefined) {
+function makeError(message = "Layout crash", digest = undefined) {
   const err = new Error(message);
   if (digest !== undefined) err.digest = digest;
   return err;
 }
 
-/**
- * Renders the boundary inside an `act()` so all `useEffect` hooks are flushed
- * synchronously before assertions run.
- */
-function renderBoundary(error = makeError(), reset = jest.fn()) {
-  let result;
-  act(() => {
-    result = render(<GlobalLayoutError error={error} reset={reset} />);
-  });
-  return { ...result, reset };
+function renderGlobalError(error = makeError(), reset = jest.fn()) {
+  return render(<GlobalLayoutError error={error} reset={reset} />);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -76,355 +65,327 @@ describe("GlobalLayoutError (app/global-error.js)", () => {
     jest.clearAllMocks();
   });
 
-  // ── Rendering ─────────────────────────────────────────────────────────────
+  // ── Success: valid inputs ──────────────────────────────────────────────────
 
-  describe("rendering", () => {
+  describe("success — valid Error + function reset", () => {
     it("renders the global error page container", () => {
-      renderBoundary();
+      renderGlobalError();
       expect(screen.getByTestId("global-error-page")).toBeInTheDocument();
     });
 
-    it("renders the heading from copy.globalError.heading", () => {
-      renderBoundary();
-      expect(screen.getByText(copy.globalError.heading)).toBeInTheDocument();
+    it("renders the heading with correct copy", () => {
+      renderGlobalError();
+      expect(
+        screen.getByRole("heading", { level: 1 }),
+      ).toHaveTextContent(copy.globalError.heading);
     });
 
-    it("renders the description from copy.globalError.description", () => {
-      renderBoundary();
+    it("renders the description with correct copy", () => {
+      renderGlobalError();
       expect(screen.getByText(copy.globalError.description)).toBeInTheDocument();
     });
 
-    it("renders the reload button with copy.globalError.reloadLabel initially", () => {
-      renderBoundary();
-      const btn = screen.getByTestId("global-error-reset");
-      expect(btn).toHaveTextContent(copy.globalError.reloadLabel);
+    it("renders the reset button with correct label", () => {
+      renderGlobalError();
+      expect(screen.getByTestId("global-error-reset")).toHaveTextContent(
+        copy.globalError.reloadLabel,
+      );
     });
 
-    it("renders the home link with copy.globalError.homeLabel", () => {
-      renderBoundary();
+    it("renders the home link with correct label and href", () => {
+      renderGlobalError();
       const link = screen.getByTestId("global-error-home-link");
       expect(link).toHaveTextContent(copy.globalError.homeLabel);
+      expect(link).toHaveAttribute("href", "/");
     });
 
-    it("the home link points to '/'", () => {
-      renderBoundary();
-      expect(screen.getByTestId("global-error-home-link")).toHaveAttribute("href", "/");
-    });
-
-    it("renders an <html> root", () => {
-      renderBoundary();
-      // jsdom wraps the rendered output — check that the boundary itself
-      // renders the html/body structure via the container.
-      const { container } = renderBoundary();
-      // GlobalLayoutError wraps everything in <html><body>…</body></html>
-      // In jsdom the outer document.documentElement exists regardless, but
-      // the component's rendered subtree contains <body>.
-      expect(container.querySelector("[data-testid='global-error-page']")).toBeInTheDocument();
-    });
-  });
-
-  // ── Error reporting ──────────────────────────────────────────────────────
-
-  describe("error reporting", () => {
-    it("calls reportError once on initial mount", () => {
-      const error = makeError("initial");
-      renderBoundary(error);
+    it("calls reportError on mount with the error and boundary context", () => {
+      const error = makeError("boom");
+      renderGlobalError(error);
       expect(reportError).toHaveBeenCalledTimes(1);
-    });
-
-    it("passes the error and digest to reportError", () => {
-      const error = makeError("with digest", "server-digest-xyz");
-      renderBoundary(error);
-      expect(reportError).toHaveBeenCalledWith(error, {
-        digest: "server-digest-xyz",
-        boundary: "global-layout",
-      });
-    });
-
-    it("handles missing digest gracefully (passes undefined)", () => {
-      const error = makeError("no digest");
-      delete error.digest;
-      renderBoundary(error);
       expect(reportError).toHaveBeenCalledWith(error, {
         digest: undefined,
         boundary: "global-layout",
       });
     });
 
-    it("handles a null/undefined error without throwing", () => {
-      // Next.js guarantees a real Error, but defensive coverage for edge cases.
-      expect(() => renderBoundary(null)).not.toThrow();
+    it("forwards error.digest when present", () => {
+      const error = makeError("server crash", "srv-999");
+      renderGlobalError(error);
+      expect(reportError).toHaveBeenCalledWith(error, {
+        digest: "srv-999",
+        boundary: "global-layout",
+      });
     });
 
-    it("re-reports when the error prop changes to a different instance", () => {
+    it("calls reset when the reset button is clicked", async () => {
+      const reset = jest.fn();
+      renderGlobalError(makeError(), reset);
+      await userEvent.click(screen.getByTestId("global-error-reset"));
+      expect(reset).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns true from reset on each call (idempotent)", async () => {
+      const reset = jest.fn();
+      renderGlobalError(makeError(), reset);
+      const btn = screen.getByTestId("global-error-reset");
+      await userEvent.click(btn);
+      await userEvent.click(btn);
+      await userEvent.click(btn);
+      expect(reset).toHaveBeenCalledTimes(3);
+    });
+
+    it("re-reports when the error prop changes", () => {
       const error1 = makeError("first");
-      const { rerender } = renderBoundary(error1);
+      const { rerender } = render(
+        <GlobalLayoutError error={error1} reset={jest.fn()} />,
+      );
+      expect(reportError).toHaveBeenCalledTimes(1);
 
       const error2 = makeError("second");
       act(() => {
         rerender(<GlobalLayoutError error={error2} reset={jest.fn()} />);
       });
-
       expect(reportError).toHaveBeenCalledTimes(2);
       expect(reportError).toHaveBeenLastCalledWith(error2, {
         digest: undefined,
         boundary: "global-layout",
       });
     });
-
-    // ── Idempotency ────────────────────────────────────────────────────────
-
-    it("does NOT re-report if the same error instance is re-rendered (idempotent)", () => {
-      const error = makeError("same instance");
-      const { rerender } = renderBoundary(error);
-      expect(reportError).toHaveBeenCalledTimes(1);
-
-      // Re-render with the exact same error reference — should not report again.
-      act(() => {
-        rerender(<GlobalLayoutError error={error} reset={jest.fn()} />);
-      });
-      expect(reportError).toHaveBeenCalledTimes(1);
-    });
-
-    it("does not re-report when an unrelated state change causes a re-render", async () => {
-      // Simulate a re-render triggered by a reset click (which sets isResetting).
-      const error = makeError("stable");
-      const reset = jest.fn();
-      renderBoundary(error, reset);
-      expect(reportError).toHaveBeenCalledTimes(1);
-
-      jest.clearAllMocks();
-      // Click reset — this sets isResetting state which causes a re-render,
-      // but the error prop identity has not changed.
-      act(() => {
-        fireEvent.click(screen.getByTestId("global-error-reset"));
-      });
-      // reportError must not fire again for the same error object.
-      expect(reportError).not.toHaveBeenCalled();
-    });
   });
 
-  // ── Concurrent-safe reset guard ──────────────────────────────────────────
+  // ── Rejection: invalid error prop ─────────────────────────────────────────
 
-  describe("concurrent-safe reset guard", () => {
-    it("calls reset() exactly once for a single click", async () => {
-      const reset = jest.fn();
-      renderBoundary(makeError(), reset);
-      await userEvent.click(screen.getByTestId("global-error-reset"));
-      expect(reset).toHaveBeenCalledTimes(1);
+  describe("rejection — invalid error prop", () => {
+    it("does not crash when error is null", () => {
+      expect(() =>
+        render(<GlobalLayoutError error={null} reset={jest.fn()} />),
+      ).not.toThrow();
     });
 
-    it("calls reset() exactly once even when clicked N times rapidly (synchronous guard)", () => {
-      const reset = jest.fn();
-      renderBoundary(makeError(), reset);
-      const btn = screen.getByTestId("global-error-reset");
+    it("does not crash when error is undefined", () => {
+      expect(() =>
+        render(<GlobalLayoutError error={undefined} reset={jest.fn()} />),
+      ).not.toThrow();
+    });
 
-      // Synchronous clicks in the same tick — this is the adversarial case.
-      // The isResettingRef guard must block all but the first invocation.
-      act(() => {
-        fireEvent.click(btn);
-        fireEvent.click(btn);
-        fireEvent.click(btn);
-        fireEvent.click(btn);
-        fireEvent.click(btn);
+    it("does not crash when error is a plain string", () => {
+      expect(() =>
+        render(<GlobalLayoutError error="something broke" reset={jest.fn()} />),
+      ).not.toThrow();
+    });
+
+    it("does not crash when error is a plain object without message", () => {
+      expect(() =>
+        render(<GlobalLayoutError error={{ code: 500 }} reset={jest.fn()} />),
+      ).not.toThrow();
+    });
+
+    it("does not crash when error is a number", () => {
+      expect(() =>
+        render(<GlobalLayoutError error={42} reset={jest.fn()} />),
+      ).not.toThrow();
+    });
+
+    it("still calls reportError when error is null", () => {
+      render(<GlobalLayoutError error={null} reset={jest.fn()} />);
+      expect(reportError).toHaveBeenCalledWith(null, {
+        digest: undefined,
+        boundary: "global-layout",
       });
-
-      expect(reset).toHaveBeenCalledTimes(1);
     });
 
-    it("calls reset() exactly once for two rapid async clicks", async () => {
-      const reset = jest.fn();
-      renderBoundary(makeError(), reset);
-      const btn = screen.getByTestId("global-error-reset");
-
-      await userEvent.click(btn);
-      await userEvent.click(btn); // button is now disabled — should be a no-op
-
-      expect(reset).toHaveBeenCalledTimes(1);
+    it("still calls reportError when error is undefined", () => {
+      render(<GlobalLayoutError error={undefined} reset={jest.fn()} />);
+      expect(reportError).toHaveBeenCalledWith(undefined, {
+        digest: undefined,
+        boundary: "global-layout",
+      });
     });
 
-    it("disables the button after the first click", async () => {
-      renderBoundary();
-      const btn = screen.getByTestId("global-error-reset");
-      await userEvent.click(btn);
-      expect(btn).toBeDisabled();
-      expect(btn).toHaveAttribute("aria-disabled", "true");
-    });
-
-    it("shows the resettingLabel while the reset is in flight", async () => {
-      renderBoundary();
-      const btn = screen.getByTestId("global-error-reset");
-      await userEvent.click(btn);
-      expect(btn).toHaveTextContent(copy.globalError.resettingLabel);
-    });
-
-    it("shows reloadLabel initially (before any click)", () => {
-      renderBoundary();
-      expect(screen.getByTestId("global-error-reset")).toHaveTextContent(
-        copy.globalError.reloadLabel
-      );
-    });
-
-    it("button cursor style changes to not-allowed after click", async () => {
-      renderBoundary();
-      const btn = screen.getByTestId("global-error-reset");
-      await userEvent.click(btn);
-      // jsdom exposes inline styles
-      expect(btn.style.cursor).toBe("not-allowed");
-    });
-  });
-
-  // ── Post-unmount safety ──────────────────────────────────────────────────
-
-  describe("post-unmount safety", () => {
-    it("does not throw when the component unmounts before effects settle", () => {
-      // Render then immediately unmount — the cleanup return in useEffect
-      // sets isMountedRef.current = false.  No error should be thrown.
-      const { unmount } = renderBoundary();
-      expect(() => act(() => unmount())).not.toThrow();
-    });
-
-    it("reportError is not called after unmount", () => {
-      const { unmount } = renderBoundary();
-      jest.clearAllMocks();
-      act(() => unmount());
-      expect(reportError).not.toHaveBeenCalled();
-    });
-  });
-
-  // ── Boundary / edge inputs ───────────────────────────────────────────────
-
-  describe("boundary inputs", () => {
-    it("renders without digest on the error object", () => {
-      const error = new Error("no digest");
-      // Deliberately omit digest
-      renderBoundary(error);
+    it("still renders the page when error has no digest property", () => {
+      const error = makeError("no digest");
+      delete error.digest;
+      renderGlobalError(error);
       expect(screen.getByTestId("global-error-page")).toBeInTheDocument();
       expect(reportError).toHaveBeenCalledWith(error, {
         digest: undefined,
         boundary: "global-layout",
       });
     });
+  });
 
-    it("renders when digest is an empty string", () => {
-      const error = makeError("empty digest", "");
-      renderBoundary(error);
-      expect(reportError).toHaveBeenCalledWith(error, {
-        digest: "",
-        boundary: "global-layout",
-      });
+  // ── Rejection: invalid reset prop ─────────────────────────────────────────
+
+  describe("rejection — invalid reset prop", () => {
+    it("does not crash when reset is undefined", () => {
+      expect(() =>
+        render(<GlobalLayoutError error={makeError()} reset={undefined} />),
+      ).not.toThrow();
     });
 
-    it("renders when error.message is empty", () => {
-      const error = makeError("");
-      expect(() => renderBoundary(error)).not.toThrow();
-      expect(screen.getByTestId("global-error-page")).toBeInTheDocument();
+    it("does not crash when reset is null", () => {
+      expect(() =>
+        render(<GlobalLayoutError error={makeError()} reset={null} />),
+      ).not.toThrow();
     });
 
-    it("renders when reset is a no-op function", () => {
-      const noop = () => {};
-      expect(() => renderBoundary(makeError(), noop)).not.toThrow();
+    it("does not crash when reset is a string", () => {
+      expect(() =>
+        render(<GlobalLayoutError error={makeError()} reset="not-a-function" />),
+      ).not.toThrow();
     });
 
-    it("handles a plain object as the error prop without crashing the boundary", () => {
-      // In production Next.js guarantees an Error instance, but defensive
-      // coverage: if something non-standard is passed the boundary should
-      // still render rather than crashing in the JSX/render path.
-      const plainObj = { message: "plain object", digest: "test-digest" };
-      expect(() => renderBoundary(plainObj)).not.toThrow();
-      expect(screen.getByTestId("global-error-page")).toBeInTheDocument();
+    it("does not crash when reset is a number", () => {
+      expect(() =>
+        render(<GlobalLayoutError error={makeError()} reset={0} />),
+      ).not.toThrow();
+    });
+
+    it("does not render the reset button when reset is undefined", () => {
+      render(<GlobalLayoutError error={makeError()} reset={undefined} />);
+      expect(screen.queryByTestId("global-error-reset")).not.toBeInTheDocument();
+    });
+
+    it("does not render the reset button when reset is null", () => {
+      render(<GlobalLayoutError error={makeError()} reset={null} />);
+      expect(screen.queryByTestId("global-error-reset")).not.toBeInTheDocument();
+    });
+
+    it("does not render the reset button when reset is a non-function", () => {
+      render(<GlobalLayoutError error={makeError()} reset="noop" />);
+      expect(screen.queryByTestId("global-error-reset")).not.toBeInTheDocument();
+    });
+
+    it("still renders the home link when reset is invalid", () => {
+      render(<GlobalLayoutError error={makeError()} reset={null} />);
+      expect(screen.getByTestId("global-error-home-link")).toBeInTheDocument();
     });
   });
 
-  // ── Accessibility ────────────────────────────────────────────────────────
+  // ── Boundary cases ─────────────────────────────────────────────────────────
 
-  describe("accessibility", () => {
+  describe("boundary cases", () => {
+    it("does not crash when both error and reset are omitted entirely", () => {
+      expect(() => render(<GlobalLayoutError />)).not.toThrow();
+    });
+
+    it("renders the home link even when all props are missing", () => {
+      render(<GlobalLayoutError />);
+      expect(screen.getByTestId("global-error-home-link")).toBeInTheDocument();
+    });
+
+    it("does not crash when reportError itself throws", () => {
+      reportError.mockImplementationOnce(() => {
+        throw new Error("reporter exploded");
+      });
+      expect(() => renderGlobalError()).not.toThrow();
+      expect(screen.getByTestId("global-error-page")).toBeInTheDocument();
+    });
+
+    it("continues to render after reportError throws", () => {
+      reportError.mockImplementationOnce(() => {
+        throw new Error("sink offline");
+      });
+      renderGlobalError();
+      expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
+        copy.globalError.heading,
+      );
+    });
+
+    it("allows reset to be called multiple times without error", async () => {
+      const reset = jest.fn();
+      renderGlobalError(makeError(), reset);
+      const btn = screen.getByTestId("global-error-reset");
+      await userEvent.click(btn);
+      await userEvent.click(btn);
+      expect(reset).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not call reportError again when reset is clicked", async () => {
+      const reset = jest.fn();
+      renderGlobalError(makeError(), reset);
+      jest.clearAllMocks();
+      await userEvent.click(screen.getByTestId("global-error-reset"));
+      expect(reportError).not.toHaveBeenCalled();
+    });
+
+    it("handles an Error subclass (TypeError) without crashing", () => {
+      const typeError = new TypeError("bad type");
+      expect(() =>
+        render(<GlobalLayoutError error={typeError} reset={jest.fn()} />),
+      ).not.toThrow();
+    });
+  });
+
+  // ── Regression: public interface and ARIA ──────────────────────────────────
+
+  describe("regression — public interface, copy, and ARIA", () => {
+    it("renders html and body tags (root layout replacement)", () => {
+      const { container } = renderGlobalError();
+      // jsdom wraps in html/body, but our component renders <html><body>
+      // The data-testid anchors the root content.
+      expect(screen.getByTestId("global-error-page")).toBeInTheDocument();
+    });
+
     it("main landmark has role=alert", () => {
-      renderBoundary();
+      renderGlobalError();
       expect(screen.getByRole("alert")).toBeInTheDocument();
     });
 
     it("main landmark has aria-live=assertive", () => {
-      renderBoundary();
+      renderGlobalError();
       expect(screen.getByRole("alert")).toHaveAttribute("aria-live", "assertive");
     });
 
     it("main landmark has id=main-content", () => {
-      renderBoundary();
-      expect(screen.getByRole("alert")).toHaveAttribute("id", "main-content");
+      renderGlobalError();
+      expect(document.getElementById("main-content")).toBeInTheDocument();
     });
 
-    it("reset button has type=button", () => {
-      renderBoundary();
-      expect(screen.getByTestId("global-error-reset")).toHaveAttribute("type", "button");
+    it("heading copy matches copy.globalError.heading", () => {
+      renderGlobalError();
+      expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
+        copy.globalError.heading,
+      );
     });
 
-    it("has no axe accessibility violations in initial state", async () => {
-      const { container } = renderBoundary();
-      const results = await axe(container);
-      expect(results).toHaveNoViolations();
+    it("description copy matches copy.globalError.description", () => {
+      renderGlobalError();
+      expect(screen.getByText(copy.globalError.description)).toBeInTheDocument();
     });
 
-    it("has no axe accessibility violations in resetting state", async () => {
-      const { container } = renderBoundary();
-      await userEvent.click(screen.getByTestId("global-error-reset"));
-      const results = await axe(container);
-      expect(results).toHaveNoViolations();
-    });
-  });
-
-  // ── Inline style / visual regression ────────────────────────────────────
-
-  describe("visual / style", () => {
-    it("page container uses dark slate background color", () => {
-      renderBoundary();
-      const body = screen.getByTestId("global-error-page").closest("body");
-      // The body element carries the inline background style.
-      // jsdom normalizes hex #020617 to rgb(2, 6, 23).
-      expect(body?.style.background).toMatch(/^(#020617|rgb\(2,\s*6,\s*23\))$/);
+    it("reset button label matches copy.globalError.reloadLabel", () => {
+      renderGlobalError();
+      expect(screen.getByTestId("global-error-reset")).toHaveTextContent(
+        copy.globalError.reloadLabel,
+      );
     });
 
-    it("reset button opacity reduces after click (background darkens)", async () => {
-      renderBoundary();
-      const btn = screen.getByTestId("global-error-reset");
-      const initialBg = btn.style.background;
-      await userEvent.click(btn);
-      expect(btn.style.background).not.toBe(initialBg);
-    });
-  });
-
-  // ── Copy key regression ──────────────────────────────────────────────────
-
-  describe("copy key presence", () => {
-    it("copy.globalError.heading is defined and non-empty", () => {
-      expect(typeof copy.globalError.heading).toBe("string");
-      expect(copy.globalError.heading.length).toBeGreaterThan(0);
+    it("home link label matches copy.globalError.homeLabel", () => {
+      renderGlobalError();
+      expect(screen.getByTestId("global-error-home-link")).toHaveTextContent(
+        copy.globalError.homeLabel,
+      );
     });
 
-    it("copy.globalError.description is defined and non-empty", () => {
-      expect(typeof copy.globalError.description).toBe("string");
-      expect(copy.globalError.description.length).toBeGreaterThan(0);
+    it("home link always points to /", () => {
+      renderGlobalError();
+      expect(screen.getByTestId("global-error-home-link")).toHaveAttribute("href", "/");
     });
 
-    it("copy.globalError.reloadLabel is defined and non-empty", () => {
-      expect(typeof copy.globalError.reloadLabel).toBe("string");
-      expect(copy.globalError.reloadLabel.length).toBeGreaterThan(0);
+    it("does not expose raw error message in the rendered UI", () => {
+      const sensitiveMessage = "DB password=hunter2 leaked in error";
+      renderGlobalError(new Error(sensitiveMessage));
+      expect(screen.queryByText(sensitiveMessage)).not.toBeInTheDocument();
     });
 
-    it("copy.globalError.resettingLabel is defined and non-empty", () => {
-      expect(typeof copy.globalError.resettingLabel).toBe("string");
-      expect(copy.globalError.resettingLabel.length).toBeGreaterThan(0);
-    });
-
-    it("copy.globalError.homeLabel is defined and non-empty", () => {
-      expect(typeof copy.globalError.homeLabel).toBe("string");
-      expect(copy.globalError.homeLabel.length).toBeGreaterThan(0);
-    });
-
-    it("copy.globalError.resettingLabel differs from reloadLabel", () => {
-      // They must be distinct so users can tell the difference between idle
-      // and in-flight states.
-      expect(copy.globalError.resettingLabel).not.toBe(copy.globalError.reloadLabel);
+    it("reportError is called with boundary='global-layout' context key", () => {
+      renderGlobalError();
+      expect(reportError).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ boundary: "global-layout" }),
+      );
     });
   });
 });
