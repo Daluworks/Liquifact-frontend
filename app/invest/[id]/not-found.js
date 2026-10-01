@@ -99,3 +99,33 @@ export default function InvoiceNotFound() {
     </div>
   );
 }
+
+/**
+ * Reads the live URL query string and maps it to a sanitized marketplace href.
+ *
+ * `useSearchParams()` may resolve to `null` (e.g. during a static render); the
+ * mapping handles that by falling back to the unfiltered marketplace (I4).
+ * Query values are only ever fed through {@link getMarketplaceHref}, which
+ * allow-lists and normalizes them before they can reach the DOM (I2).
+ *
+ * @returns {JSX.Element}
+ */
+function RouteAwareInvoiceNotFound() {
+  const searchParams = useSearchParams();
+  return <InvoiceNotFoundView marketplaceHref={getMarketplaceHref(searchParams)} />;
+}
+
+/**
+ * Public boundary component.
+ *
+ * The `<Suspense>` wrapper keeps `useSearchParams` compatible with static
+ * generation (Next.js CSR bail-out). The fallback shows the safe, unfiltered
+ * marketplace destination, so the page is useful even before hydration.
+ */
+export default function InvoiceNotFound() {
+  return (
+    <Suspense fallback={<InvoiceNotFoundView marketplaceHref={MARKETPLACE_FALLBACK_HREF} />}>
+      <RouteAwareInvoiceNotFound />
+    </Suspense>
+  );
+}
