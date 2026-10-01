@@ -47,23 +47,43 @@ import { ImageResponse } from "next/og";
 export const runtime = "edge";
 
 /**
- * Icon dimensions.
- * MUST remain 180×180 — Apple Touch Icon specification requirement.
- * Also spread into `ImageResponse` to guarantee bitmap matches advertisement.
+ * Standard Apple touch icon size invariant (180x180 px).
+ * Frozen to prevent runtime tampering or mutations during concurrent execution.
  */
-export const size = {
+export const size = Object.freeze({
   width: 180,
   height: 180,
-} as const;
+});
 
-/** MUST remain "image/png" — see contract above. */
 export const contentType = "image/png";
 
-// ─── Minimal fallback PNG (1×1 transparent) ─────────────────────────────────
-// Used only when ImageResponse throws so the caller always receives a Response.
-// Generated via: `convert -size 1x1 xc:none PNG:- | base64`
-const FALLBACK_PNG =
-  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+/**
+ * Fallback dimensions ensuring consistency if route metadata is tampered with.
+ */
+const DEFAULT_ICON_SIZE = Object.freeze({
+  width: 180,
+  height: 180,
+});
+
+/**
+ * Renders the Apple Touch Icon for iOS/mobile bookmarks and web app shortcuts.
+ * Hardened for concurrent and repeated execution:
+ * - Invariant enforcement on dimensions and content type.
+ * - Deterministic, idempotent response generation without mutable shared state.
+ * - Safe error handling with fallback rendering to prevent 500 edge crashes.
+ * - Diagnostic observability without exposing sensitive environment or request data.
+ */
+export default function AppleIcon() {
+  try {
+    // Validate size invariants
+    const resolvedSize =
+      size &&
+      typeof size.width === "number" &&
+      typeof size.height === "number" &&
+      size.width === DEFAULT_ICON_SIZE.width &&
+      size.height === DEFAULT_ICON_SIZE.height
+        ? size
+        : DEFAULT_ICON_SIZE;
 
 // ─── Route handler ───────────────────────────────────────────────────────────
 
@@ -95,19 +115,37 @@ export default function AppleIcon(): Response {
         </div>
       ),
       {
-        // Spread `size` so the rendered bitmap always matches the exported
-        // dimension contract — a single source of truth.
-        ...size,
+        width: resolvedSize.width,
+        height: resolvedSize.height,
       }
     );
-  } catch {
-    // Invariant 1: never propagate errors to the caller.
-    // Return a minimal valid PNG so the HTTP layer is always satisfied.
-    const fallbackBody = FALLBACK_PNG.replace(/^data:image\/png;base64,/, "");
-    const bytes = Buffer.from(fallbackBody, "base64");
-    return new Response(bytes, {
-      status: 200,
-      headers: { "Content-Type": contentType },
-    });
+  } catch (error) {
+    // Safe failure recovery: log diagnosable error without leaking sensitive internals
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    console.error(`[apple-icon] Failed to generate icon: ${errorMessage}`);
+
+    // Return a minimal, deterministic fallback ImageResponse
+    return new ImageResponse(
+      <div
+        style={{
+          fontSize: 100,
+          background: "#020617",
+          color: "#22d3ee",
+          width: "100%",
+          height: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          borderRadius: "20%",
+          fontWeight: 800,
+        }}
+      >
+        L
+      </div>,
+      {
+        width: DEFAULT_ICON_SIZE.width,
+        height: DEFAULT_ICON_SIZE.height,
+      }
+    );
   }
 }
