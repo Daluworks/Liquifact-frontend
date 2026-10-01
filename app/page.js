@@ -1,5 +1,6 @@
 "use client";
 
+import { useRef, useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { useCallback, useRef, useState, useEffect } from "react";
 import NavMenu from "../components/NavMenu";
@@ -113,11 +114,24 @@ export function sanitizeHealthResult(result) {
 export default function Home() {
   const [health, setHealth] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
   const abortRef = useRef(null);
+  // Monotoonic request id ensures only the latest in-flight request can
+  // commit state. Guards against out-of-order resolution when a previous
+  // request's abort races with a new request's resolution.
+  const requestIdRef = useRef(0);
+  // Tracks mounted state so late resolutions after unmount do not call
+  // setState (avoids React warnings and stale updates).
+  const mountedRef = useRef(true);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
+      // Bump the request id so any in-flight resolution is treated as stale.
+      requestIdRef.current += 1;
       abortRef.current?.abort();
+      abortRef.current = null;
     };
   }, []);
 
@@ -151,7 +165,9 @@ export default function Home() {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
+    const requestId = ++requestIdRef.current;
 
+    setError(null);
     setLoading(true);
     try {
       const result = await getHealth(API_URL, { signal: controller.signal });
@@ -161,9 +177,28 @@ export default function Home() {
       // storing in state so the render tree never sees attacker-controlled values.
       setHealth(sanitizeHealthResult(result));
     } catch (err) {
+      // Aborted requests are expected during supersession/unmount; swallow
+      // them. Any other error is also ignored for state purposes but we
+      // still avoid clobbering newer requests.
       if (err?.name === "AbortError") return;
+      // Only surface errors for the latest, mounted request so a stale
+      // failure cannot overwrite a newer success.
+      if (
+        requestId !== requestIdRef.current ||
+        !mountedRef.current ||
+        controller.signal.aborted
+      ) {
+        return;
+      }
+      setError(err);
     } finally {
-      if (!controller.signal.aborted) {
+      // Only clear loading if this is still the active request and the
+      // component is mounted; otherwise a newer request owns the flag.
+      if (
+        requestId === requestIdRef.current &&
+        mountedRef.current &&
+        !controller.signal.aborted
+      ) {
         setLoading(false);
       }
     }
@@ -212,6 +247,15 @@ export default function Home() {
           </button>
 
           {loading && <HealthStatusSkeleton />}
+
+          {!loading && error && (
+            <div
+              role="alert"
+              className="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300"
+            >
+              {copy.home.healthStatus.unreachable}
+            </div>
+          )}
 
           {!loading && health && (
             <div className="mt-4">

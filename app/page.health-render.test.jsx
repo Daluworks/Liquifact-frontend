@@ -28,6 +28,10 @@ jest.mock("../components/WalletStatusLazy", () => ({
   },
 }));
 
+jest.mock("../components/NavMenu", () => function MockNavMenu() {
+  return <div data-testid="nav-menu">NavMenu</div>;
+});
+
 jest.mock("next/link", () => {
   function MockLink({ href, children, ...props }) {
     return (
@@ -375,5 +379,72 @@ describe("Home health render", () => {
     fireEvent.click(btn);
     await waitFor(() => expect(btn).not.toBeDisabled());
     expect(within(screen.getByRole("status")).getAllByText(/unreachable/i).length).toBeGreaterThan(0);
+  });
+
+  it("shows a failure message when the backend responds non-ok", async () => {
+    mockFetchOnce({ status: "error", message: "unavailable" }, false);
+    render(<Home />);
+
+    await clickCheckHealth();
+
+    expect(screen.getByText(/unavailable|indicates a problem|failed/i)).toBeInTheDocument();
+  });
+
+  it("handles a rejected fetch without leaving the ui in a loading state", async () => {
+    global.fetch = jest.fn().mockRejected(new Error("network down"));
+    render(<Home />);
+
+    await clickCheckHealth();
+
+    expect(screen.queryByText(/checking/i)).not.toBeInTheDocument();
+  });
+
+  it("ignores duplicate clicks while a request is in flight", async () => {
+    const deferred = mockFetchDeferred();
+    render(<Home />);
+
+    const button = screen.getByRole("button", { name: /check backend health/i });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    deferred.resolveWith({ status: "ok", message: "All good" });
+    await waitFor(() => expect(screen.queryByText(/checking/i)).not.toBeInTheDocument());
+
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("serializes concurrent checks so the latest result wins", async () => {
+    const first = mockFetchDeferred();
+    render(<Home />);
+
+    const button = screen.getByRole("button", { name: /check backend health/i });
+    fireEvent.click(button);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    // A second click while the first is in flight must not start a new request.
+    fireEvent.click(button);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    first.resolveWith({ status: "ok", message: "first" });
+    await waitFor(() => expect(screen.queryByText(/checking/i)).not.toBeInTheDocument());
+
+    expect(screen.getByText(/first/i)).toBeInTheDocument();
+  });
+
+  it("returns to a usable state after a failure so a retry can succeed", async () => {
+    global.fetch = jest.fn().mockRejected(new Error("network down"));
+    render(<Home />);
+
+    await clickCheckHealth();
+
+    expect(screen.queryByText(/checking/i)).not.toBeInTheDocument();
+
+    mockFetchOnce({ status: "ok", message: "recovered" });
+    await clickCheckHealth();
+
+    expect(screen.getByText(/recovered/i)).toBeInTheDocument();
   });
 });
