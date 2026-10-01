@@ -4,11 +4,12 @@ import "@testing-library/jest-dom";
 
 const mockRefresh = jest.fn();
 
+// next/navigation is not available in jsdom; mock the parts we need.
 jest.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: mockRefresh }),
 }));
 
-import InvoiceNotFound from "./not-found";
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 describe("InvoiceNotFound", () => {
   beforeEach(() => {

@@ -81,6 +81,10 @@ import { TRUSTED_WALLET_INSTALL_URL } from "./constants";
  * @property {string} invest.detail.actionGroupLabel
  * @property {string} invest.detail.labelReference
  * @property {string} invest.detail.exportGroupLabel
+ * @property {string} invest.detail.notFoundStatusLabel
+ * @property {string} invest.detail.notFoundHeading
+ * @property {string} invest.detail.notFoundDescription
+ * @property {string} invest.detail.notFoundMarketplaceLabel
  * @property {string} invest.detail.exportCSVButton
  * @property {string} invest.detail.exportCSVLabel
  * @property {string} invest.detail.exportJSONButton

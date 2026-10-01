@@ -215,5 +215,50 @@ export function getInvoiceById(id) {
   return MOCK_INVOICES.find((invoice) => invoice.id === id);
 }
 
+/**
+ * Validate an invoice ID segment received from the URL.
+ *
+ * An ID is considered valid when ALL of the following are true:
+ *   1. It is a non-null, non-undefined string.
+ *   2. After trimming it is non-empty (blocks pure-whitespace segments).
+ *   3. Its length does not exceed MAX_INVOICE_ID_LENGTH (128 chars).
+ *   4. It matches the allowed character set: [A-Za-z0-9_-].
+ *      This rejects segments that contain path-traversal characters (e.g.
+ *      `../`), null bytes, HTML metacharacters, or other unexpected input.
+ *
+ * The function deliberately has NO side-effects and does NOT throw —
+ * callers receive a structured result and decide how to proceed.
+ *
+ * @param {unknown} id - Raw ID value from `params.id`.
+ * @returns {{ valid: boolean, reason?: string }}
+ *
+ * @example
+ * validateInvoiceId("inv-001")   // { valid: true }
+ * validateInvoiceId("")          // { valid: false, reason: "empty" }
+ * validateInvoiceId("../secret") // { valid: false, reason: "invalid-chars" }
+ * validateInvoiceId(null)        // { valid: false, reason: "not-a-string" }
+ */
+export const MAX_INVOICE_ID_LENGTH = 128;
+
+/** Allowlist: alphanumeric, hyphen, underscore only. */
+const SAFE_ID_RE = /^[A-Za-z0-9_-]+$/;
+
+export function validateInvoiceId(id) {
+  if (typeof id !== "string") {
+    return { valid: false, reason: "not-a-string" };
+  }
+  const trimmed = id.trim();
+  if (trimmed.length === 0) {
+    return { valid: false, reason: "empty" };
+  }
+  if (trimmed.length > MAX_INVOICE_ID_LENGTH) {
+    return { valid: false, reason: "too-long" };
+  }
+  if (!SAFE_ID_RE.test(trimmed)) {
+    return { valid: false, reason: "invalid-chars" };
+  }
+  return { valid: true };
+}
+
 // NOTE: This file is the single source of truth for mock invoice data
 // until the API client is fully integrated.
