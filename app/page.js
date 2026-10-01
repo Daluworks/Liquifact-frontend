@@ -1,5 +1,6 @@
 "use client";
 
+import { useRef, useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { useReducer, useRef, useEffect } from "react";
 import NavMenu from "../components/NavMenu";
@@ -19,8 +20,54 @@ import {
 
 const API_URL = env.apiUrl;
 
-// Status mapping to visual states
-// Maps getHealth return values to badge styles and labels
+/**
+ * Exhaustive allowlist of status values returned by getHealth.
+ *
+ * Any status value NOT in this set is treated as 'unreachable' before it is
+ * stored in state or rendered. This prevents attacker-controlled status strings
+ * from leaking into the aria-live region, badge label, or structured summary.
+ *
+ * @type {ReadonlySet<string>}
+ */
+const STATUS_ALLOWLIST = Object.freeze(new Set(["connected", "degraded", "unreachable"]));
+
+/**
+ * Maximum character length for health.message rendered in the aria-live region.
+ * Caps an unusually long server-controlled string to prevent layout abuse.
+ */
+const MESSAGE_MAX_LEN = 300;
+
+/**
+ * Maximum character length for individual field values in the structured summary.
+ * Each value is rendered via truncateString so the DOM cannot be flooded with
+ * a giant server-supplied string.
+ */
+const FIELD_VALUE_MAX_LEN = 200;
+
+/**
+ * Normalises a raw status value from getHealth to one of the three known states.
+ * Any unrecognised value maps to "unreachable" — the safest, most visible fallback.
+ *
+ * ## Why normalise here rather than in getStatusConfig?
+ * Normalising at the point of state storage (inside checkApi) means that
+ * `health.status` in component state is always a member of STATUS_ALLOWLIST.
+ * Downstream consumers — badge, aria-live region, structured summary — never
+ * see an attacker-controlled string, so there is a single enforcement point
+ * rather than defensive checks scattered across the render tree.
+ *
+ * @param {unknown} status - Raw status from the API response.
+ * @returns {"connected" | "degraded" | "unreachable"}
+ */
+export function normalizeStatus(status) {
+  if (typeof status === "string" && STATUS_ALLOWLIST.has(status)) {
+    return status;
+  }
+  return "unreachable";
+}
+
+// Status mapping to visual states.
+// Maps normalised getHealth return values to badge styles and labels.
+// All inputs are guaranteed to be in STATUS_ALLOWLIST at this point.
 const getStatusConfig = (status) => {
   switch (status) {
     case "connected":
@@ -36,16 +83,11 @@ const getStatusConfig = (status) => {
         icon: "⚠",
       };
     case "unreachable":
+    default:
       return {
         label: copy.home.healthStatus.unreachable,
         badgeClass: "bg-red-500/10 text-red-400 border-red-500/20",
         icon: "✕",
-      };
-    default:
-      return {
-        label: status,
-        badgeClass: "bg-slate-500/10 text-slate-400 border-slate-500/20",
-        icon: "?",
       };
   }
 };
@@ -72,6 +114,7 @@ export default function Home() {
     return () => {
       mountedRef.current = false;
       abortRef.current?.abort();
+      abortRef.current = null;
     };
   }, []);
 
@@ -118,7 +161,7 @@ export default function Home() {
       inFlightRef.current = false;
       if (abortRef.current === controller) abortRef.current = null;
     }
-  };
+  }, [loading]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -164,6 +207,15 @@ export default function Home() {
 
           {loading && <HealthStatusSkeleton />}
 
+          {!loading && error && (
+            <div
+              role="alert"
+              className="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300"
+            >
+              {copy.home.healthStatus.unreachable}
+            </div>
+          )}
+
           {!loading && health && (
             <div className="mt-4">
               {/* Structured health status card with color-coded badge */}
@@ -174,7 +226,8 @@ export default function Home() {
                 className="rounded-lg border border-slate-700 bg-slate-800/50 p-4"
               >
                 <div className="flex items-center gap-3 mb-3">
-                  {/* Color-coded badge with icon and text - not color-only for accessibility */}
+                  {/* Color-coded badge with icon and text — not color-only for accessibility.
+                      health.status is always a STATUS_ALLOWLIST member at this point. */}
                   <span
                     className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border ${getStatusConfig(health.status).badgeClass}`}
                   >
@@ -183,18 +236,23 @@ export default function Home() {
                   </span>
                 </div>
 
-                {/* Structured summary for recognized fields */}
+                {/* Structured summary for recognised fields.
+                    Field values are capped at FIELD_VALUE_MAX_LEN characters to prevent
+                    an oversized server-supplied string from flooding the DOM. */}
                 <div className="text-xs text-slate-300 space-y-1 mb-3">
                   {Object.entries(extractKnownFields(health.details || health)).map(
                     ([key, value]) => (
                       <div key={key}>
                         <span className="text-slate-500 font-semibold">{key}:</span>{" "}
-                        <span className="text-slate-300">{String(value)}</span>
+                        <span className="text-slate-300">
+                          {truncateString(String(value), FIELD_VALUE_MAX_LEN)}
+                        </span>
                       </div>
                     )
                   )}
                 </div>
 
+                {/* health.message is already capped at MESSAGE_MAX_LEN by sanitizeHealthResult. */}
                 <p className="text-sm text-slate-300">{health.message}</p>
 
                 {/* Raw response — always shown behind an expandable section */}
