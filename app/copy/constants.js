@@ -1,3 +1,4 @@
+
 /**
  * Centralized constants for the application.
  * All constants are validated at module load time to fail-fast on invalid configuration.
