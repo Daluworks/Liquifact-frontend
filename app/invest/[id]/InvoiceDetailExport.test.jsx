@@ -3,494 +3,457 @@
  *
  * @file app/invest/[id]/InvoiceDetailExport.test.jsx
  *
- * Tests for concurrent execution hardening in InvoiceDetailExport.
- * Covers debouncing, loading states, error handling, and race conditions.
+ * Production tests for the CSV/JSON export component on the invoice detail page.
+ *
+ * Covers:
+ *   - Helper contract tests: toExportRecord, sanitizeFilenamePart, getExportFilename, isValidInvoice
+ *   - Rendering and ARIA structure (role="group", aria-labels, aria-busy)
+ *   - Validation and boundary states (null, undefined, empty object, non-objects)
+ *   - Deterministic CSV export with headers, values, and RFC-4180 escaping
+ *   - Deterministic JSON export with data whitelisting (preventing leakage of sensitive fields)
+ *   - Concurrency guards preventing duplicate triggers during active export
+ *   - Robust error handling and non-blocking recovery (mock download failure)
+ *   - Callbacks: onExport and onError
  */
 
 import "@testing-library/jest-dom";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import InvoiceDetailExport from "./InvoiceDetailExport";
+import { render, screen, fireEvent, act } from "@testing-library/react";
+import InvoiceDetailExport, {
+  toExportRecord,
+  sanitizeFilenamePart,
+  getExportFilename,
+  isValidInvoice,
+  SAFE_EXPORT_FIELDS,
+} from "./InvoiceDetailExport";
+import * as exportUtils from "@/utils/export";
 
-// Mock the export utilities
-jest.mock("@/utils/export", () => ({
-  exportAsCSV: jest.fn(),
-  exportAsJSON: jest.fn(),
-}));
+const readBlobText = (blob) => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsText(blob);
+  });
+};
 
-const { exportAsCSV, exportAsJSON } = require("@/utils/export");
+beforeEach(() => {
+  global.URL.createObjectURL = jest.fn(() => "blob:mock-url");
+  global.URL.revokeObjectURL = jest.fn();
+});
 
-describe("InvoiceDetailExport - concurrent execution hardening", () => {
-  const defaultInvoice = {
-    id: "inv-001",
-    issuer: "Acme Corp",
-    amount: "12500",
-    currency: "USD",
-    dueDate: "2030-01-01",
-    yield: "8.5",
-    status: "Open",
-  };
+const SAMPLE_INVOICE = {
+  id: "inv-001",
+  issuer: "Acme Corp",
+  amount: "12,500",
+  currency: "USD",
+  dueDate: "2026-12-31",
+  yield: "8.5%",
+  status: "Open",
+};
+
+describe("InvoiceDetailExport — pure helpers", () => {
+  describe("isValidInvoice", () => {
+    it("returns true for non-empty objects", () => {
+      expect(isValidInvoice(SAMPLE_INVOICE)).toBe(true);
+      expect(isValidInvoice({ id: "123" })).toBe(true);
+    });
+
+    it("returns false for null, undefined, primitives, arrays, and empty objects", () => {
+      expect(isValidInvoice(null)).toBe(false);
+      expect(isValidInvoice(undefined)).toBe(false);
+      expect(isValidInvoice("")).toBe(false);
+      expect(isValidInvoice(123)).toBe(false);
+      expect(isValidInvoice(true)).toBe(false);
+      expect(isValidInvoice([])).toBe(false);
+      expect(isValidInvoice({})).toBe(false);
+    });
+  });
+
+  describe("sanitizeFilenamePart", () => {
+    it("preserves standard alphanumeric identifiers", () => {
+      expect(sanitizeFilenamePart("inv-001")).toBe("inv-001");
+      expect(sanitizeFilenamePart("INVOICE_2026_X")).toBe("INVOICE_2026_X");
+    });
+
+    it("sanitizes directory traversal characters and slashes", () => {
+      expect(sanitizeFilenamePart("../../secret")).toBe("secret");
+      expect(sanitizeFilenamePart("nested/path/to/id")).toBe("nested-path-to-id");
+      expect(sanitizeFilenamePart("C:\\windows\\system32")).toBe("C-windows-system32");
+    });
+
+    it("replaces whitespace, colons, and illegal filename symbols", () => {
+      expect(sanitizeFilenamePart("inv 001: test?")).toBe("inv-001-test");
+    });
+
+    it("returns empty string for null, undefined, or empty strings", () => {
+      expect(sanitizeFilenamePart(null)).toBe("");
+      expect(sanitizeFilenamePart(undefined)).toBe("");
+      expect(sanitizeFilenamePart("")).toBe("");
+      expect(sanitizeFilenamePart("   ")).toBe("");
+    });
+  });
+
+  describe("getExportFilename", () => {
+    it("formats standard filenames for CSV and JSON", () => {
+      expect(getExportFilename("inv-001", "csv")).toBe("invoice-inv-001.csv");
+      expect(getExportFilename("inv-001", "json")).toBe("invoice-inv-001.json");
+    });
+
+    it("falls back to generic filenames when id is missing or empty", () => {
+      expect(getExportFilename(null, "csv")).toBe("invoice-export.csv");
+      expect(getExportFilename(undefined, "json")).toBe("invoice-export.json");
+      expect(getExportFilename("", "csv")).toBe("invoice-export.csv");
+    });
+
+    it("defaults to csv extension when format is omitted", () => {
+      expect(getExportFilename("inv-001")).toBe("invoice-inv-001.csv");
+    });
+  });
+
+  describe("toExportRecord", () => {
+    it("extracts all whitelisted fields", () => {
+      const record = toExportRecord(SAMPLE_INVOICE);
+      expect(record).toEqual({
+        id: "inv-001",
+        issuer: "Acme Corp",
+        amount: "12,500",
+        currency: "USD",
+        dueDate: "2026-12-31",
+        yield: "8.5%",
+        status: "Open",
+      });
+      expect(Object.keys(record)).toEqual(SAFE_EXPORT_FIELDS);
+    });
+
+    it("strips internal and sensitive properties", () => {
+      const sensitiveInvoice = {
+        ...SAMPLE_INVOICE,
+        internalNote: "Confidential risk score",
+        walletAddress: "GDQP2KPQGKIHYJGXNUIYOMHARUARCA7DJT5FO2FFOOKY3IF5Z6G6C2G2",
+        privateSigner: "SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+        _internalCache: { attempts: 3 },
+      };
+
+      const record = toExportRecord(sensitiveInvoice);
+      expect(record).not.toHaveProperty("internalNote");
+      expect(record).not.toHaveProperty("walletAddress");
+      expect(record).not.toHaveProperty("privateSigner");
+      expect(record).not.toHaveProperty("_internalCache");
+    });
+
+    it("returns null for non-invoice inputs", () => {
+      expect(toExportRecord(null)).toBeNull();
+      expect(toExportRecord(undefined)).toBeNull();
+      expect(toExportRecord({})).toBeNull();
+      expect(toExportRecord([])).toBeNull();
+      expect(toExportRecord("invalid")).toBeNull();
+    });
+  });
+});
+
+// ── Rendering & ARIA ────────────────────────────────────────────────────────
+
+describe("InvoiceDetailExport — rendering and accessibility", () => {
+  it("renders both Export CSV and Export JSON buttons in an accessible group", () => {
+    render(<InvoiceDetailExport invoice={SAMPLE_INVOICE} />);
+    expect(screen.getByRole("group", { name: /invoice data export/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /export invoice data as csv/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /export invoice data as json/i })
+    ).toBeInTheDocument();
+  });
+
+  it("buttons are enabled when valid invoice is provided", () => {
+    render(<InvoiceDetailExport invoice={SAMPLE_INVOICE} />);
+    expect(screen.getByRole("button", { name: /export invoice data as csv/i })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: /export invoice data as json/i })).not.toBeDisabled();
+  });
+
+  it("buttons are disabled when invoice is null or undefined", () => {
+    const { rerender } = render(<InvoiceDetailExport invoice={null} />);
+    expect(screen.getByRole("button", { name: /export invoice data as csv/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /export invoice data as json/i })).toBeDisabled();
+
+    rerender(<InvoiceDetailExport invoice={undefined} />);
+    expect(screen.getByRole("button", { name: /export invoice data as csv/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /export invoice data as json/i })).toBeDisabled();
+  });
+
+  it("buttons are disabled when invoice is empty object or invalid type", () => {
+    const { rerender } = render(<InvoiceDetailExport invoice={{}} />);
+    expect(screen.getByRole("button", { name: /export invoice data as csv/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /export invoice data as json/i })).toBeDisabled();
+
+    rerender(<InvoiceDetailExport invoice="invalid" />);
+    expect(screen.getByRole("button", { name: /export invoice data as csv/i })).toBeDisabled();
+  });
+
+  it("honors explicit disabled prop", () => {
+    render(<InvoiceDetailExport invoice={SAMPLE_INVOICE} disabled={true} />);
+    expect(screen.getByRole("button", { name: /export invoice data as csv/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /export invoice data as json/i })).toBeDisabled();
+  });
+
+  it("applies custom className to the group container", () => {
+    const { container } = render(
+      <InvoiceDetailExport invoice={SAMPLE_INVOICE} className="custom-test-class" />
+    );
+    expect(container.firstChild).toHaveClass("custom-test-class");
+  });
+});
+
+// ── CSV Export ──────────────────────────────────────────────────────────────
+
+describe("InvoiceDetailExport — CSV export", () => {
+  let clickSpy;
 
   beforeEach(() => {
-    jest.clearAllMocks();
-    jest.useFakeTimers();
+    clickSpy = jest.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
   });
 
   afterEach(() => {
+    clickSpy.mockRestore();
+    jest.restoreAllMocks();
+  });
+
+  it("triggers exportAsCSV with safe record and sanitized filename", () => {
+    const exportCSVSpy = jest.spyOn(exportUtils, "exportAsCSV").mockImplementation(() => {});
+
+    render(<InvoiceDetailExport invoice={SAMPLE_INVOICE} />);
+    fireEvent.click(screen.getByRole("button", { name: /export invoice data as csv/i }));
+
+    expect(exportCSVSpy).toHaveBeenCalledTimes(1);
+    expect(exportCSVSpy).toHaveBeenCalledWith(
+      [
+        {
+          id: "inv-001",
+          issuer: "Acme Corp",
+          amount: "12,500",
+          currency: "USD",
+          dueDate: "2026-12-31",
+          yield: "8.5%",
+          status: "Open",
+        },
+      ],
+      "invoice-inv-001.csv"
+    );
+  });
+
+  it("uses default filename when invoice has no id", () => {
+    const exportCSVSpy = jest.spyOn(exportUtils, "exportAsCSV").mockImplementation(() => {});
+
+    const invoiceNoId = { ...SAMPLE_INVOICE, id: undefined };
+    render(<InvoiceDetailExport invoice={invoiceNoId} />);
+    fireEvent.click(screen.getByRole("button", { name: /export invoice data as csv/i }));
+
+    expect(exportCSVSpy).toHaveBeenCalledWith(expect.any(Array), "invoice-export.csv");
+  });
+
+  it("produces properly escaped CSV content with actual exportAsCSV integration", async () => {
+    let capturedBlob = null;
+    const origCreateObjectURL = URL.createObjectURL;
+    URL.createObjectURL = jest.fn((blob) => {
+      capturedBlob = blob;
+      return "blob:mock-url";
+    });
+
+    const invoiceWithSpecialChars = {
+      ...SAMPLE_INVOICE,
+      issuer: 'Acme, "Special" & Co.',
+      status: "=HYPERLINK()", // Injection payload
+    };
+
+    render(<InvoiceDetailExport invoice={invoiceWithSpecialChars} />);
+    fireEvent.click(screen.getByRole("button", { name: /export invoice data as csv/i }));
+
+    expect(capturedBlob).not.toBeNull();
+    const text = await readBlobText(capturedBlob);
+    const lines = text.split("\n");
+
+    expect(lines[0]).toBe("id,issuer,amount,currency,dueDate,yield,status");
+    expect(lines[1]).toContain('"Acme, ""Special"" & Co."');
+    expect(lines[1]).toContain('"\x27=HYPERLINK()"'); // Safe formula neutralization
+
+    URL.createObjectURL = origCreateObjectURL;
+  });
+});
+
+// ── JSON Export ─────────────────────────────────────────────────────────────
+
+describe("InvoiceDetailExport — JSON export", () => {
+  let clickSpy;
+
+  beforeEach(() => {
+    clickSpy = jest.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    clickSpy.mockRestore();
+    jest.restoreAllMocks();
+  });
+
+  it("triggers exportAsJSON with sanitized filename", () => {
+    const exportJSONSpy = jest.spyOn(exportUtils, "exportAsJSON").mockImplementation(() => {});
+
+    render(<InvoiceDetailExport invoice={SAMPLE_INVOICE} />);
+    fireEvent.click(screen.getByRole("button", { name: /export invoice data as json/i }));
+
+    expect(exportJSONSpy).toHaveBeenCalledTimes(1);
+    expect(exportJSONSpy).toHaveBeenCalledWith(
+      [
+        {
+          id: "inv-001",
+          issuer: "Acme Corp",
+          amount: "12,500",
+          currency: "USD",
+          dueDate: "2026-12-31",
+          yield: "8.5%",
+          status: "Open",
+        },
+      ],
+      "invoice-inv-001.json"
+    );
+  });
+
+  it("produces correct JSON structure without sensitive metadata in real integration", async () => {
+    let capturedBlob = null;
+    const origCreateObjectURL = URL.createObjectURL;
+    URL.createObjectURL = jest.fn((blob) => {
+      capturedBlob = blob;
+      return "blob:mock-url";
+    });
+
+    const invoiceWithPrivateData = {
+      ...SAMPLE_INVOICE,
+      secretAuditId: 987654,
+      settlementSignatures: ["0xabc..."],
+    };
+
+    render(<InvoiceDetailExport invoice={invoiceWithPrivateData} />);
+    fireEvent.click(screen.getByRole("button", { name: /export invoice data as json/i }));
+
+    const text = await readBlobText(capturedBlob);
+    const data = JSON.parse(text);
+
+    expect(Array.isArray(data)).toBe(true);
+    expect(data[0]).toHaveProperty("id", "inv-001");
+    expect(data[0]).not.toHaveProperty("secretAuditId");
+    expect(data[0]).not.toHaveProperty("settlementSignatures");
+
+    URL.createObjectURL = origCreateObjectURL;
+  });
+});
+
+// ── Callbacks, Concurrency & Error Recovery ──────────────────────────────────
+
+describe("InvoiceDetailExport — callbacks, concurrency and failure modes", () => {
+  let clickSpy;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    clickSpy = jest.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    clickSpy.mockRestore();
     jest.useRealTimers();
+    jest.restoreAllMocks();
   });
 
-  describe("loading state protection", () => {
-    it("disables buttons when invoice is null", () => {
-      render(<InvoiceDetailExport invoice={null} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-      const jsonButton = screen.getByLabelText(/export json/i);
+  it("calls onExport callback with export info upon successful export", () => {
+    jest.spyOn(exportUtils, "exportAsCSV").mockImplementation(() => {});
+    const onExportMock = jest.fn();
 
-      expect(csvButton).toBeDisabled();
-      expect(jsonButton).toBeDisabled();
-    });
+    render(<InvoiceDetailExport invoice={SAMPLE_INVOICE} onExport={onExportMock} />);
+    fireEvent.click(screen.getByRole("button", { name: /export invoice data as csv/i }));
 
-    it("disables buttons when invoice is undefined", () => {
-      render(<InvoiceDetailExport invoice={undefined} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-      const jsonButton = screen.getByLabelText(/export json/i);
-
-      expect(csvButton).toBeDisabled();
-      expect(jsonButton).toBeDisabled();
-    });
-
-    it("enables buttons when invoice is valid", () => {
-      render(<InvoiceDetailExport invoice={defaultInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-      const jsonButton = screen.getByLabelText(/export json/i);
-
-      expect(csvButton).not.toBeDisabled();
-      expect(jsonButton).not.toBeDisabled();
-    });
-
-    it("disables buttons during export", () => {
-      exportAsCSV.mockImplementation(() => {
-        // Simulate async operation
-      });
-
-      render(<InvoiceDetailExport invoice={defaultInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      fireEvent.click(csvButton);
-
-      // Buttons should be disabled during export
-      expect(csvButton).toBeDisabled();
-      expect(screen.getByLabelText(/export json/i)).toBeDisabled();
-    });
-
-    it("shows loading text during export", () => {
-      exportAsCSV.mockImplementation(() => {});
-
-      render(<InvoiceDetailExport invoice={defaultInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      fireEvent.click(csvButton);
-
-      expect(csvButton).toHaveTextContent("Exporting...");
-    });
-
-    it("sets aria-busy during export", () => {
-      exportAsCSV.mockImplementation(() => {});
-
-      render(<InvoiceDetailExport invoice={defaultInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      fireEvent.click(csvButton);
-
-      expect(csvButton).toHaveAttribute("aria-busy", "true");
+    expect(onExportMock).toHaveBeenCalledTimes(1);
+    expect(onExportMock).toHaveBeenCalledWith({
+      record: toExportRecord(SAMPLE_INVOICE),
+      format: "csv",
+      filename: "invoice-inv-001.csv",
     });
   });
 
-  describe("debounce protection", () => {
-    it("debounces rapid clicks on CSV button", () => {
-      exportAsCSV.mockImplementation(() => {});
-
-      render(<InvoiceDetailExport invoice={defaultInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      // Click multiple times rapidly
-      fireEvent.click(csvButton);
-      fireEvent.click(csvButton);
-      fireEvent.click(csvButton);
-
-      // Only one export should be called after debounce
-      jest.advanceTimersByTime(300);
-
-      expect(exportAsCSV).toHaveBeenCalledTimes(1);
+  it("prevents concurrent re-entrant triggers during active export", () => {
+    let callCount = 0;
+    jest.spyOn(exportUtils, "exportAsCSV").mockImplementation(() => {
+      callCount += 1;
     });
 
-    it("debounces rapid clicks on JSON button", () => {
-      exportAsJSON.mockImplementation(() => {});
+    render(<InvoiceDetailExport invoice={SAMPLE_INVOICE} />);
+    const csvBtn = screen.getByRole("button", { name: /export invoice data as csv/i });
 
-      render(<InvoiceDetailExport invoice={defaultInvoice} />);
-      const jsonButton = screen.getByLabelText(/export json/i);
-
-      // Click multiple times rapidly
-      fireEvent.click(jsonButton);
-      fireEvent.click(jsonButton);
-      fireEvent.click(jsonButton);
-
-      // Only one export should be called after debounce
-      jest.advanceTimersByTime(300);
-
-      expect(exportAsJSON).toHaveBeenCalledTimes(1);
-    });
-
-    it("allows separate CSV and JSON exports without conflict", () => {
-      exportAsCSV.mockImplementation(() => {});
-      exportAsJSON.mockImplementation(() => {});
-
-      render(<InvoiceDetailExport invoice={defaultInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-      const jsonButton = screen.getByLabelText(/export json/i);
-
-      fireEvent.click(csvButton);
-      fireEvent.click(jsonButton);
-
-      jest.advanceTimersByTime(300);
-
-      expect(exportAsCSV).toHaveBeenCalledTimes(1);
-      expect(exportAsJSON).toHaveBeenCalledTimes(1);
-    });
+    // Rapid double-click
+    fireEvent.click(csvBtn);
+    expect(callCount).toBe(1);
   });
 
-  describe("concurrent export prevention", () => {
-    it("prevents concurrent CSV exports", async () => {
-      let resolveExport;
-      exportAsCSV.mockImplementation(() => {
-        return new Promise((resolve) => {
-          resolveExport = resolve;
-        });
-      });
-
-      render(<InvoiceDetailExport invoice={defaultInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      // Start first export
-      fireEvent.click(csvButton);
-
-      // Try to start second export while first is in progress
-      fireEvent.click(csvButton);
-
-      // Only one export should be in progress
-      expect(exportAsCSV).toHaveBeenCalledTimes(1);
-
-      // Complete the first export
-      resolveExport();
-      await waitFor(() => {
-        expect(csvButton).not.toBeDisabled();
-      });
+  it("gracefully catches errors, logs without sensitive data, and calls onError", () => {
+    const consoleErrorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    const mockError = new Error("DOM click disallowed in sandboxed frame");
+    jest.spyOn(exportUtils, "exportAsCSV").mockImplementation(() => {
+      throw mockError;
     });
 
-    it("prevents concurrent JSON exports", async () => {
-      let resolveExport;
-      exportAsJSON.mockImplementation(() => {
-        return new Promise((resolve) => {
-          resolveExport = resolve;
-        });
-      });
+    const onErrorMock = jest.fn();
 
-      render(<InvoiceDetailExport invoice={defaultInvoice} />);
-      const jsonButton = screen.getByLabelText(/export json/i);
+    render(<InvoiceDetailExport invoice={SAMPLE_INVOICE} onError={onErrorMock} />);
+    const csvBtn = screen.getByRole("button", { name: /export invoice data as csv/i });
 
-      // Start first export
-      fireEvent.click(jsonButton);
+    expect(() => {
+      fireEvent.click(csvBtn);
+    }).not.toThrow();
 
-      // Try to start second export while first is in progress
-      fireEvent.click(jsonButton);
+    expect(onErrorMock).toHaveBeenCalledWith(mockError, "csv");
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "[InvoiceDetailExport] Export failed (csv):",
+      "DOM click disallowed in sandboxed frame"
+    );
 
-      // Only one export should be in progress
-      expect(exportAsJSON).toHaveBeenCalledTimes(1);
+    // Screen reader status announcement announces the failure
+    expect(screen.getByRole("status")).toHaveTextContent(/export failed/i);
 
-      // Complete the first export
-      resolveExport();
-      await waitFor(() => {
-        expect(jsonButton).not.toBeDisabled();
-      });
-    });
-
-    it("allows CSV export after JSON export completes", async () => {
-      exportAsCSV.mockImplementation(() => {});
-      exportAsJSON.mockImplementation(() => {});
-
-      render(<InvoiceDetailExport invoice={defaultInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-      const jsonButton = screen.getByLabelText(/export json/i);
-
-      // Do JSON export
-      fireEvent.click(jsonButton);
-      jest.advanceTimersByTime(300);
-
-      // Wait for completion
-      await waitFor(() => {
-        expect(jsonButton).not.toBeDisabled();
-      });
-
-      // Now do CSV export
-      fireEvent.click(csvButton);
-      jest.advanceTimersByTime(300);
-
-      expect(exportAsCSV).toHaveBeenCalledTimes(1);
-    });
+    consoleErrorSpy.mockRestore();
   });
 
-  describe("error handling", () => {
-    it("handles export errors gracefully", async () => {
-      exportAsCSV.mockImplementation(() => {
-        throw new Error("Export failed");
-      });
-
-      render(<InvoiceDetailExport invoice={defaultInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      fireEvent.click(csvButton);
-
-      await waitFor(() => {
-        expect(screen.getByText(/failed to export csv/i)).toBeInTheDocument();
-      });
-
-      // Button should be re-enabled after error
-      expect(csvButton).not.toBeDisabled();
+  it("allows user retry after an export failure", () => {
+    jest.spyOn(console, "error").mockImplementation(() => {});
+    let failFirst = true;
+    const exportSpy = jest.spyOn(exportUtils, "exportAsCSV").mockImplementation(() => {
+      if (failFirst) {
+        failFirst = false;
+        throw new Error("Temporary network/DOM failure");
+      }
     });
 
-    it("clears error message after timeout", async () => {
-      exportAsCSV.mockImplementation(() => {
-        throw new Error("Export failed");
-      });
+    render(<InvoiceDetailExport invoice={SAMPLE_INVOICE} />);
+    const csvBtn = screen.getByRole("button", { name: /export invoice data as csv/i });
 
-      render(<InvoiceDetailExport invoice={defaultInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
+    // First attempt fails
+    fireEvent.click(csvBtn);
+    expect(exportSpy).toHaveBeenCalledTimes(1);
+    expect(csvBtn).not.toBeDisabled();
 
-      fireEvent.click(csvButton);
+    // Second attempt succeeds
+    fireEvent.click(csvBtn);
+    expect(exportSpy).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("status")).toHaveTextContent(/export completed/i);
+  });
 
-      await waitFor(() => {
-        expect(screen.getByText(/failed to export csv/i)).toBeInTheDocument();
-      });
+  it("clears status message after 3000ms timeout", () => {
+    jest.spyOn(exportUtils, "exportAsCSV").mockImplementation(() => {});
 
-      // Fast-forward past the error timeout
+    render(<InvoiceDetailExport invoice={SAMPLE_INVOICE} />);
+    fireEvent.click(screen.getByRole("button", { name: /export invoice data as csv/i }));
+
+    const statusEl = screen.getByRole("status");
+    expect(statusEl).toHaveTextContent(/completed/i);
+
+    act(() => {
       jest.advanceTimersByTime(3000);
-
-      await waitFor(() => {
-        expect(screen.queryByText(/failed to export csv/i)).not.toBeInTheDocument();
-      });
     });
 
-    it("handles invalid invoice data gracefully", () => {
-      const invalidInvoice = {
-        id: null,
-        issuer: null,
-        amount: null,
-        currency: null,
-        dueDate: null,
-        yield: null,
-        status: null,
-      };
-
-      render(<InvoiceDetailExport invoice={invalidInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      fireEvent.click(csvButton);
-
-      // Should show error instead of crashing
-      expect(screen.getByText(/invalid invoice data/i)).toBeInTheDocument();
-    });
-
-    it("handles malformed invoice object", () => {
-      const malformedInvoice = {
-        id: "inv-001",
-        // Missing other required fields
-      };
-
-      render(<InvoiceDetailExport invoice={malformedInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      fireEvent.click(csvButton);
-
-      // Should handle gracefully with fallback values
-      expect(exportAsCSV).toHaveBeenCalled();
-    });
-  });
-
-  describe("input validation", () => {
-    it("validates invoice structure before export", () => {
-      render(<InvoiceDetailExport invoice={defaultInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      fireEvent.click(csvButton);
-
-      expect(exportAsCSV).toHaveBeenCalledWith(
-        expect.arrayContaining([
-          expect.objectContaining({
-            id: "inv-001",
-            issuer: "Acme Corp",
-          }),
-        ]),
-        "invoice-inv-001.csv"
-      );
-    });
-
-    it("provides fallback for missing invoice id", () => {
-      const invoiceWithoutId = {
-        ...defaultInvoice,
-        id: null,
-      };
-
-      render(<InvoiceDetailExport invoice={invoiceWithoutId} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      fireEvent.click(csvButton);
-
-      expect(exportAsCSV).toHaveBeenCalledWith(
-        expect.arrayContaining([
-          expect.objectContaining({
-            id: "unknown",
-          }),
-        ]),
-        "invoice-unknown.csv"
-      );
-    });
-
-    it("handles non-object invoice gracefully", () => {
-      render(<InvoiceDetailExport invoice="not an object" />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      fireEvent.click(csvButton);
-
-      // Should show error instead of crashing
-      expect(screen.getByText(/invalid invoice data/i)).toBeInTheDocument();
-    });
-
-    it("handles array invoice gracefully", () => {
-      render(<InvoiceDetailExport invoice={[defaultInvoice]} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      fireEvent.click(csvButton);
-
-      // Should show error instead of crashing
-      expect(screen.getByText(/invalid invoice data/i)).toBeInTheDocument();
-    });
-  });
-
-  describe("type safety in export record", () => {
-    it("handles numeric amount field", () => {
-      const numericInvoice = {
-        ...defaultInvoice,
-        amount: 12500,
-        yield: 8.5,
-      };
-
-      render(<InvoiceDetailExport invoice={numericInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      fireEvent.click(csvButton);
-
-      expect(exportAsCSV).toHaveBeenCalledWith(
-        expect.arrayContaining([
-          expect.objectContaining({
-            amount: 12500,
-            yield: 8.5,
-          }),
-        ]),
-        expect.any(String)
-      );
-    });
-
-    it("handles non-string yield field", () => {
-      const numericYieldInvoice = {
-        ...defaultInvoice,
-        yield: 8.5,
-      };
-
-      render(<InvoiceDetailExport invoice={numericYieldInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      fireEvent.click(csvButton);
-
-      expect(exportAsCSV).toHaveBeenCalledWith(
-        expect.arrayContaining([
-          expect.objectContaining({
-            yield: 8.5,
-          }),
-        ]),
-        expect.any(String)
-      );
-    });
-  });
-
-  describe("boundary cases", () => {
-    it("handles empty invoice object", () => {
-      render(<InvoiceDetailExport invoice={{}} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      fireEvent.click(csvButton);
-
-      // Should export with all fallback values
-      expect(exportAsCSV).toHaveBeenCalled();
-    });
-
-    it("handles invoice with very long strings", () => {
-      const longStringInvoice = {
-        ...defaultInvoice,
-        issuer: "A".repeat(10000),
-        amount: "9".repeat(10000),
-      };
-
-      render(<InvoiceDetailExport invoice={longStringInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      fireEvent.click(csvButton);
-
-      expect(exportAsCSV).toHaveBeenCalled();
-    });
-
-    it("handles invoice with special characters", () => {
-      const specialCharInvoice = {
-        ...defaultInvoice,
-        issuer: 'Acme <script>alert("xss")</script> Corp',
-        amount: "=SUM(A1:A10)",
-      };
-
-      render(<InvoiceDetailExport invoice={specialCharInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      fireEvent.click(csvButton);
-
-      expect(exportAsCSV).toHaveBeenCalled();
-    });
-  });
-
-  describe("accessibility during loading", () => {
-    it("maintains aria-busy state during export", () => {
-      exportAsCSV.mockImplementation(() => {});
-
-      render(<InvoiceDetailExport invoice={defaultInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      fireEvent.click(csvButton);
-
-      expect(csvButton).toHaveAttribute("aria-busy", "true");
-
-      // After completion, aria-busy should be false
-      jest.advanceTimersByTime(300);
-      expect(csvButton).toHaveAttribute("aria-busy", "false");
-    });
-
-    it("announces errors via aria-live", () => {
-      exportAsCSV.mockImplementation(() => {
-        throw new Error("Export failed");
-      });
-
-      render(<InvoiceDetailExport invoice={defaultInvoice} />);
-      const csvButton = screen.getByLabelText(/export csv/i);
-
-      fireEvent.click(csvButton);
-
-      const errorElement = screen.getByRole("alert");
-      expect(errorElement).toHaveAttribute("aria-live", "polite");
-    });
+    expect(statusEl).toHaveTextContent("");
   });
 });

@@ -3,22 +3,29 @@
 /**
  * @file app/invest/[id]/InvoiceDetailExport.jsx
  *
- * Client-side CSV/JSON export for the invoice detail view.
+ * Client-side CSV/JSON export component for the invoice detail view.
  *
- * Renders two buttons (Export CSV, Export JSON) that trigger a browser
- * download of the current invoice's metadata. No server round-trip.
- *
- * Safe escaping is delegated to `utils/export.js` which handles commas,
- * quotes, and newlines in CSV values.
- *
- * Concurrent execution safety:
- * - Uses loading state to prevent multiple simultaneous exports
- * - Debounces rapid button clicks to avoid duplicate exports
- * - Provides user feedback during export operations
- * - Validates invoice data before export
+ * Invariants & Contract Guarantees
+ * ────────────────────────────────
+ * 1. Safe Field Boundary: Only explicitly whitelisted public metadata fields
+ *    (`SAFE_EXPORT_FIELDS`) are extracted. Private internal properties (e.g.,
+ *    `internalNote`, `walletAddress`, keys) are never exported.
+ * 2. Deterministic Serialization: Valid, empty, partial, and malformed invoice
+ *    inputs are handled deterministically without throwing uncaught exceptions.
+ * 3. Filename Sanitization: Invoice IDs in download filenames are scrubbed to
+ *    prevent path traversal or invalid filesystem characters. Missing IDs fallback
+ *    to safe default filenames (`invoice-export.csv`, `invoice-export.json`).
+ * 4. Idempotency & Concurrency Guard: Prevents duplicate concurrent downloads
+ *    or race conditions during rapid user clicks using synchronous ref locks.
+ * 5. Failure Handling & Observability: Failures during Blob generation or DOM
+ *    dispatch are caught, safely logged (without exposing PII/secrets), and
+ *    communicated through ARIA live regions (`role="status"`) for immediate
+ *    user feedback and clean recovery/retry.
+ * 6. Accessibility: Conforms to WAI-ARIA group role contracts, explicit
+ *    button aria-labels, and `.focus-ring` focus visibility.
  */
 
-import { useCallback, useState, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { exportAsCSV, exportAsJSON } from "@/utils/export";
 import { copy } from "@/app/copy/en";
 import { useToast } from "@/components/ToastProvider";
@@ -26,26 +33,89 @@ import { useToast } from "@/components/ToastProvider";
 const detail = copy.invest.detail;
 
 /**
+ * Whitelist of safe, publicly exportable invoice fields.
+ * Prevents sensitive internal fields from leaking into client-side downloads.
+ *
+ * @type {readonly string[]}
+ */
+export const SAFE_EXPORT_FIELDS = Object.freeze([
+  "id",
+  "issuer",
+  "amount",
+  "currency",
+  "dueDate",
+  "yield",
+  "status",
+]);
+
+/**
+ * Sanitizes an invoice ID for safe usage in download filenames.
+ * Strips path traversal characters, directory separators, control characters,
+ * spaces, and special symbols across platforms.
+ *
+ * @param {unknown} id - Raw invoice identifier
+ * @returns {string} Sanitized string safe for filenames
+ */
+export function sanitizeFilenamePart(id) {
+  if (id === null || id === undefined) return "";
+  const str = String(id).trim();
+  const cleaned = str
+    .replace(/[\\/:*?"<>|\x00-\x1f\s]/g, "-")
+    .replace(/\.{2,}/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
+  return cleaned;
+}
+
+/**
+ * Generates a deterministic, safe export filename for a given invoice and format.
+ *
+ * @param {unknown} invoiceId - Invoice ID to include in filename
+ * @param {"csv" | "json"} [format="csv"] - Target export file format
+ * @returns {string} Download filename with proper extension
+ */
+export function getExportFilename(invoiceId, format = "csv") {
+  const safeId = sanitizeFilenamePart(invoiceId);
+  const ext = format === "json" ? "json" : "csv";
+  if (!safeId) {
+    return `invoice-export.${ext}`;
+  }
+  return `invoice-${safeId}.${ext}`;
+}
+
+/**
+ * Validates that an input is a non-null, non-array object with exportable fields.
+ *
+ * @param {unknown} invoice
+ * @returns {boolean} True if invoice is valid for export
+ */
+export function isValidInvoice(invoice) {
+  if (!invoice || typeof invoice !== "object" || Array.isArray(invoice)) {
+    return false;
+  }
+  return Object.keys(invoice).length > 0;
+}
+
+/**
  * Strip the invoice object down to a safe, flat export record.
- * Validates invoice structure and returns null for invalid data.
+ * Only includes whitelisted public fields to prevent data leakage.
+ * Returns null if the invoice is invalid or not an object.
  *
  * @param {object|null|undefined} invoice
- * @returns {object|null}
+ * @returns {Record<string, unknown>|null}
  */
-function toExportRecord(invoice) {
-  if (!invoice || typeof invoice !== "object") {
+export function toExportRecord(invoice) {
+  if (!isValidInvoice(invoice)) {
     return null;
   }
-
-  // Validate required fields with fallbacks
-  const record = {
-    id: typeof invoice.id === "string" ? invoice.id : "unknown",
-    issuer: typeof invoice.issuer === "string" ? invoice.issuer : "",
-    amount: typeof invoice.amount === "string" || typeof invoice.amount === "number" ? invoice.amount : "",
-    currency: typeof invoice.currency === "string" ? invoice.currency : "",
-    dueDate: typeof invoice.dueDate === "string" ? invoice.dueDate : "",
-    yield: typeof invoice.yield === "string" || typeof invoice.yield === "number" ? invoice.yield : "",
-    status: typeof invoice.status === "string" ? invoice.status : "",
+  return {
+    id: invoice.id,
+    issuer: invoice.issuer,
+    amount: invoice.amount,
+    currency: invoice.currency,
+    dueDate: invoice.dueDate,
+    yield: invoice.yield,
+    status: invoice.status,
   };
 
   return record;
@@ -87,108 +157,127 @@ function useDebounce(func, delay) {
  * - Input validation before export
  *
  * @param {object} props
- * @param {object|null} props.invoice - The invoice object to export
+ * @param {object|null} [props.invoice] - The invoice object to export
+ * @param {string} [props.className] - Optional extra class names for container
+ * @param {boolean} [props.disabled] - Optional explicit override to disable buttons
+ * @param {(exportInfo: { record: object, format: string, filename: string }) => void} [props.onExport] - Export success callback
+ * @param {(error: unknown, format: string) => void} [props.onError] - Export failure callback
  */
-export default function InvoiceDetailExport({ invoice }) {
-  const [isExporting, setIsExporting] = useState(false);
-  const [exportError, setExportError] = useState(null);
-  const exportInProgressRef = useRef(false);
+export default function InvoiceDetailExport({
+  invoice,
+  className = "",
+  disabled: customDisabled = false,
+  onExport,
+  onError,
+}) {
+  const [exportingFormat, setExportingFormat] = useState(null);
+  const [statusMessage, setStatusMessage] = useState("");
+  const isExportingRef = useRef(false);
 
-  const disabled = !invoice || isExporting;
+  const isInvoiceValid = isValidInvoice(invoice);
+  const isExporting = Boolean(exportingFormat);
+  const disabled = customDisabled || !isInvoiceValid || isExporting;
 
-  /**
-   * Safely execute export with concurrent execution protection.
-   * Prevents multiple simultaneous exports of the same type.
-   *
-   * @param {Function} exportFn - The export function to execute
-   * @param {string} filename - The filename for the export
-   * @param {string} exportType - For error messages (CSV or JSON)
-   */
-  const safeExport = useCallback(
-    async (exportFn, filename, exportType) => {
-      // Guard against concurrent exports
-      if (exportInProgressRef.current) {
-        console.warn(`Export already in progress, ignoring ${exportType} request`);
+  // Auto-clear status message after timeout to prevent stale announcements
+  useEffect(() => {
+    if (!statusMessage) return;
+    const timer = setTimeout(() => {
+      setStatusMessage("");
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [statusMessage]);
+
+  const executeExport = useCallback(
+    (format) => {
+      if (!isInvoiceValid || isExportingRef.current) {
         return;
       }
 
-      // Validate invoice data
-      const record = toExportRecord(invoice);
-      if (!record) {
-        setExportError(`Invalid invoice data for ${exportType} export`);
-        setTimeout(() => setExportError(null), 3000);
-        return;
-      }
+      isExportingRef.current = true;
+      setExportingFormat(format);
+      setStatusMessage("");
 
       try {
-        exportInProgressRef.current = true;
-        setIsExporting(true);
-        setExportError(null);
+        const record = toExportRecord(invoice);
+        if (!record) {
+          throw new Error("Unable to create export record from invoice");
+        }
 
-        // Execute export
-        exportFn([record], filename);
+        const filename = getExportFilename(invoice?.id, format);
 
-        // Clear error after successful export
-        setExportError(null);
-      } catch (error) {
-        console.error(`Failed to export ${exportType}:`, error);
-        setExportError(`Failed to export ${exportType}: ${error.message}`);
-        setTimeout(() => setExportError(null), 3000);
+        if (format === "csv") {
+          exportAsCSV([record], filename);
+        } else if (format === "json") {
+          exportAsJSON([record], filename);
+        } else {
+          throw new Error(`Unsupported export format: ${format}`);
+        }
+
+        const successMsg =
+          format === "csv"
+            ? `${detail.exportCSVButton || "CSV"} export completed.`
+            : `${detail.exportJSONButton || "JSON"} export completed.`;
+        setStatusMessage(successMsg);
+
+        if (typeof onExport === "function") {
+          onExport({ record, format, filename });
+        }
+      } catch (err) {
+        const safeMessage =
+          err instanceof Error ? err.message : "Export process encountered an error";
+        console.error(`[InvoiceDetailExport] Export failed (${format}):`, safeMessage);
+
+        const errorMsg = `Export failed: ${safeMessage}`;
+        setStatusMessage(errorMsg);
+
+        if (typeof onError === "function") {
+          onError(err, format);
+        }
       } finally {
-        setIsExporting(false);
-        exportInProgressRef.current = false;
+        isExportingRef.current = false;
+        setExportingFormat(null);
       }
     },
-    [invoice]
+    [invoice, isInvoiceValid, onExport, onError]
   );
 
   const handleExportCSV = useCallback(() => {
-    if (!invoice) return;
-    safeExport(exportAsCSV, `invoice-${invoice.id || "unknown"}.csv`, "CSV");
-  }, [invoice, safeExport]);
+    executeExport("csv");
+  }, [executeExport]);
 
   const handleExportJSON = useCallback(() => {
-    if (!invoice) return;
-    safeExport(exportAsJSON, `invoice-${invoice.id || "unknown"}.json`, "JSON");
-  }, [invoice, safeExport]);
-
-  // Debounce export handlers to prevent rapid clicks
-  const debouncedExportCSV = useDebounce(handleExportCSV, 300);
-  const debouncedExportJSON = useDebounce(handleExportJSON, 300);
+    executeExport("json");
+  }, [executeExport]);
 
   return (
-    <div className="no-print flex flex-col gap-2" role="group" aria-label={detail.exportGroupLabel}>
-      <div className="flex gap-3">
-        <button
-          type="button"
-          onClick={debouncedExportCSV}
-          disabled={disabled}
-          aria-label={detail.exportCSVLabel}
-          aria-busy={isExporting}
-          className="rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-2 text-sm text-cyan-400 hover:bg-slate-700 focus-ring disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-        >
-          {isExporting ? "Exporting..." : detail.exportCSVButton}
-        </button>
-        <button
-          type="button"
-          onClick={debouncedExportJSON}
-          disabled={disabled}
-          aria-label={detail.exportJSONLabel}
-          aria-busy={isExporting}
-          className="rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-2 text-sm text-cyan-400 hover:bg-slate-700 focus-ring disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-        >
-          {isExporting ? "Exporting..." : detail.exportJSONButton}
-        </button>
-      </div>
-      {exportError && (
-        <div
-          role="alert"
-          aria-live="polite"
-          className="text-red-400 text-xs"
-        >
-          {exportError}
-        </div>
-      )}
+    <div
+      className={`no-print flex gap-3 ${className}`.trim()}
+      role="group"
+      aria-label={detail.exportGroupLabel}
+    >
+      <button
+        type="button"
+        onClick={handleExportCSV}
+        disabled={disabled}
+        aria-label={detail.exportCSVLabel}
+        aria-busy={exportingFormat === "csv"}
+        className="rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-2 text-sm text-cyan-400 hover:bg-slate-700 focus-ring disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+      >
+        {detail.exportCSVButton}
+      </button>
+      <button
+        type="button"
+        onClick={handleExportJSON}
+        disabled={disabled}
+        aria-label={detail.exportJSONLabel}
+        aria-busy={exportingFormat === "json"}
+        className="rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-2 text-sm text-cyan-400 hover:bg-slate-700 focus-ring disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+      >
+        {detail.exportJSONButton}
+      </button>
+      <span role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        {statusMessage}
+      </span>
     </div>
   );
 }
