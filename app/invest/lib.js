@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * @file app/invest/lib.js
  *
@@ -190,6 +191,8 @@ export function daysUntilMaturity(dateStr, now = new Date()) {
 
   return Math.round((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
 }
+
+// ── getInvoiceById (LIB-6) ───────────────────────────────────────────────────
 
 /**
  * Resolve an invoice by its `id` from the mock invoice list.
