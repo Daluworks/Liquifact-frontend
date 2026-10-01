@@ -11,7 +11,46 @@
  *
  * Contract per item: { id, category, label, type, value, description }
  * Categories cover: notifications, display, privacy, wallet, advanced.
+ *
+ * ── Compatibility contract (do NOT break without a migration plan) ──────────
+ * Public surface preserved by this module:
+ *   - `MOCK_SETTINGS` is a non-empty, frozen array of rows with the shape
+ *     { id, category, label, type, value, description }; every `id` is unique
+ *     and every field is a string. Rows are frozen so accidental mutation in
+ *     one caller can never leak into another.
+ *   - `loadMockSettings(options?)` ALWAYS resolves to an array and NEVER
+ *     rejects — including for pre-aborted signals, invalid `options`/`signal`
+ *     shapes, and the dev-only machine-speed delay. An aborted load resolves
+ *     to `[]` (empty data) rather than throwing.
+ *   - `getCategoryList(list)` ALWAYS returns `["all", ...]` with distinct,
+ *     non-empty string categories sorted deterministically; non-array input
+ *     yields `["all"]`.
+ *   - `getSettingById(id)` returns a row for a known id and `undefined` for
+ *     unknown / non-string ids (never throws).
+ *   - `getCategories` remains a back-compat alias of `getCategoryList`.
  */
+
+/** The categories the settings fixtures are allowed to use. */
+export const SETTINGS_CATEGORIES = ["notifications", "display", "privacy", "wallet", "advanced"];
+
+/**
+ * Recursively freeze a value so the exported fixtures cannot be mutated by a
+ * caller and silently corrupt every other consumer (the single-source-of-truth
+ * guarantee documented above).
+ *
+ * @template T
+ * @param {T} value
+ * @returns {T}
+ */
+function deepFreeze(value) {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const key of Object.keys(value)) {
+      deepFreeze(value[key]);
+    }
+  }
+  return value;
+}
 
 export const MOCK_SETTINGS = [
   {
@@ -216,38 +255,70 @@ export const MOCK_SETTINGS = [
   },
 ];
 
+// Freeze the single source of truth so no caller can mutate it in place.
+deepFreeze(MOCK_SETTINGS);
+
 // DEV-only delay (ms) to keep the load-more cycle perceptible in dev.
 const DEV_DELAY = process.env.NODE_ENV === "development" ? 80 : 0;
-const SETTING_FIELDS = ["id", "category", "label", "type", "value", "description"];
+const SETTING_FIELDS = [
+  "id",
+  "category",
+  "label",
+  "type",
+  "value",
+  "description",
+];
 
-// This shared fixture is read-only; callers that edit settings must own their state copy.
-for (const setting of MOCK_SETTINGS) Object.freeze(setting);
+// Shared fixtures stay immutable; every load returns independently owned rows.
+for (const setting of MOCK_SETTINGS) {
+  Object.freeze(setting);
+}
 Object.freeze(MOCK_SETTINGS);
 
-function validateSettingsOverride(settings) {
+function validateSettings(settings) {
   if (!Array.isArray(settings)) {
-    throw new TypeError("Settings test override must be an array.");
+    throw new TypeError("[settings] Settings must be an array.");
   }
 
   const ids = new Set();
-  for (const [index, setting] of settings.entries()) {
+  return Array.from(settings, (setting, index) => {
     if (!setting || typeof setting !== "object" || Array.isArray(setting)) {
-      throw new TypeError(`Settings test override row ${index} must be an object.`);
+      throw new TypeError(`[settings] Invalid setting row at index ${index}.`);
     }
 
+    const row = {};
     for (const field of SETTING_FIELDS) {
-      if (typeof setting[field] !== "string") {
-        throw new TypeError(`Settings test override row ${index} has an invalid ${field} field.`);
+      const value = setting[field];
+      if (
+        typeof value !== "string" ||
+        (field !== "value" && field !== "description" && value.trim() === "")
+      ) {
+        throw new TypeError(
+          `[settings] Invalid setting field "${field}" at index ${index}.`
+        );
       }
+      row[field] = value;
     }
 
-    if (["id", "category", "label", "type"].some((field) => !setting[field].trim())) {
-      throw new TypeError(`Settings test override row ${index} has an empty required field.`);
+    if (ids.has(row.id)) {
+      throw new TypeError(`[settings] Duplicate setting id at index ${index}.`);
     }
-    if (ids.has(setting.id)) {
-      throw new TypeError(`Settings test override contains a duplicate id at row ${index}.`);
-    }
-    ids.add(setting.id);
+    ids.add(row.id);
+    return row;
+  });
+}
+
+function isAbortSignal(signal) {
+  try {
+    return (
+      signal !== null &&
+      typeof signal === "object" &&
+      typeof signal.aborted === "boolean" &&
+      typeof signal.addEventListener === "function" &&
+      typeof signal.removeEventListener === "function"
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -519,7 +590,8 @@ export function loadMockSettings(options = {}) {
  * 4. Returned array always starts with "all", followed by sorted unique categories.
  *
  * @param {Array} list
- * @returns {string[]}
+ * @returns {string[]} `["all", ...distinctCategories]`; `["all"]` for
+ *   non-array input.
  */
 export function getCategoryList(list) {
   if (!Array.isArray(list)) return ["all"];
@@ -548,7 +620,8 @@ export { getCategoryList as getCategories };
  * 2. Lookup is deterministic, non-throwing, and immutable.
  *
  * @param {string} id
- * @returns {object|undefined}
+ * @returns {object|undefined} The matching frozen row, or `undefined` for an
+ *   unknown id or a non-string id. Never throws.
  */
 export function getSettingById(id) {
   if (typeof id !== "string") return undefined;

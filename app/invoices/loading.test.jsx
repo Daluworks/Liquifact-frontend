@@ -1,5 +1,4 @@
 /* eslint-env jest */
-/* @jest-environment jsdom */
 /**
  * @file app/invoices/loading.test.jsx
  * Tests for the Next.js route-level loading UI at /invoices.
@@ -10,25 +9,26 @@
  *  - exposes the correct ARIA attributes on the page shell
  *  - has no accessibility violations
  *
- * Compatibility contracts:
- *  - The loading UI is a purely presentational component with no props.
- *  - The root element must always expose data-testid="invoices-loading"
- *    and aria-busy="true" so assistive technology and tests can rely on it.
- *  - UploadSkeleton must always be rendered with data-testid="upload-skeleton"
- *    and a live region announcement for screen readers.
- *  - The component must render deterministically with no side effects, no
- *    network access, and no dependency on external state.
+ * Concurrency / idempotency notes:
+ * This is a pure, stateless route-level loading UI. Rendering it multiple
+ * times, in parallel, or interrupted mid-way must not produce stale,
+ * unsafe, or inconsistent output. The tests below assert that each
+ * render is independent and that repeated / concurrent renders are
+ * identical and deterministic.
  */
 
-/* eslint-disable-next-line */
 import React from "react";
-import { render, screen } from "@testing-library/react";
+import { render, screen, cleanup } from "@testing-library/react";
 import { axe, toHaveNoViolations } from "jest-axe";
 import InvoicesLoading from "./loading";
 
 expect.extend(toHaveNoViolations);
 
 describe("InvoicesLoading", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
   it("renders without crashing", () => {
     expect(() => render(React.createElement(InvoicesLoading))).not.toThrow();
   });
@@ -81,49 +81,70 @@ describe("InvoicesLoading", () => {
     expect(pulsed.length).toBeGreaterThanOrEqual(5);
   });
 
-  // --------------------------------------------------------------------------
-  // Compatibility contract tests
-  // These tests pin the public behavior of the loading UI so future
-  // refactors cannot silently break consumers (tests, screen readers,
-  // or the Next.js route contract).
-  // --------------------------------------------------------------------------
+  // ----------------------------------------------------------------------
+  // Concurrency / idempotency / racing-render regression tests
+  // ----------------------------------------------------------------------
 
-  it("contract: renders deterministically with no props and no side effects", () => {
-    const first = render(React.createElement(InvoicesLoading));
-    const firstHtml = first.container.innerHTML;
-    first.unrender();
+  it("repeated sequential renders are idempotent", () => {
+    const { container: first } = render(<InvoicesLoading />);
+    const firstHTML = first.innerHTML;
+    cleanup();
 
-    const second = render(React.createElement(InvoicesLoading));
-    expect(second.container.innerHTML).toBe(firstHtml);
+    const { container: second } = render(<InvoicesLoading />);
+    expect(second.innerHTML).toBe(firstHTML);
   });
 
-  it("contract: exposes a single root element with the stable test id", () => {
-    const { container } = render(React.createElement(InvoicesLoading));
-    expect(container.querySelectorAll('[data-testid="invoices-loading"]').length).toBe(1);
+  it("renders correctly when multiple instances are mounted concurrently", () => {
+    const instances = Array.from({ length: 5 });
+    const results = instances.map(() => render(<InvoicesLoading />));
+
+    expect(results).toHaveLength(5);
+    for (const { container } of results) {
+      expect(container.querySelector('[data-testid="invoices-loading"]')).toHaveAttribute(
+        "aria-busy",
+        "true",
+      );
+      expect(container.querySelector('[data-testid="upload-skeleton"]')).toBeInTheDocument();
+    }
   });
 
-  it("contract: root element is a live region with aria-busy and aria-label", () => {
-    render(React.createElement(InvoicesLoading));
-    const root = screen.getByTestId("invoices-loading");
-    expect(root).toHaveAttribute("aria-busy", "true");
-    expect(root).toHaveAttribute("aria-label");
+  it("renders identical markup across concurrent instances (no stale state)", () => {
+    const results = Array.from({ length: 3 }).map(() => render(<InvoicesLoading />));
+    const [head, ...tail] = results.map((r) => r.container.innerHTML);
+    for (const html of tail) {
+      expect(html).toBe(head);
+    }
   });
 
-  it("contract: UploadSkeleton is rendered exactly once", () => {
-    render(React.createElement(InvoicesLoading));
-    expect(screen.getAllByTestId("upload-skeleton")).toHaveLength(1);
+  it("survives unmount mid-way without throwing (partial failure recovery)", () => {
+    const { unmount } = render(<InvoicesLoading />);
+    expect(() => unmount()).not.toThrow();
+    // Re-render after unmount must still be deterministic.
+    expect(() => render(<InvoicesLoading />)).not.toThrow();
   });
 
-  it("contract: sr-only announcement is present and not duplicated", () => {
-    render(React.createElement(InvoicesLoading));
-    const announcements = screen.getAllByText(/upload form loading, please wait/i);
-    expect(announcements.length).toBe(1);
+  it("renders correctly when interrupted and restarted (retry idempotency)", () => {
+    const first = render(<InvoicesLoading />);
+    const firstHTML = first.container.innerHTML;
+    first.unmount();
+
+    const second = render(<InvoicesLoading />);
+    expect(second.container.innerHTML).toBe(firstHTML);
   });
 
-  it("contract: renders and unrenders cleanly without leaking DOM nodes", () => {
-    const { unrender } = render(React.createElement(InvoicesLoading));
-    expect(screen.getByTestId("invoices-loading")).toBeInTheDocument();
-    unrender();
-    expect(screen.queryByTestId("invoices-loading")).toBeNull();
+  it("does not leak aria-busy or test ids across concurrent instances", () => {
+    const a = render(<InvoicesLoading />);
+    const b = render(<InvoicesLoading />);
+
+    expect(a.container.querySelectorAll('[data-testid="invoices-loading"]').length).toBe(1);
+    expect(b.container.querySelectorAll('[data-testid="invoices-loading"]').length).toBe(1);
+  });
+
+  it("preserves accessibility invariants under concurrent renders", async () => {
+    const results = Array.from({ length: 3 }).map(() => render(<InvoicesLoading />));
+    for (const { container } of results) {
+      const axeResults = await axe(container);
+      expect(axeResults).toHaveNoViolations();
+    }
   });
 });

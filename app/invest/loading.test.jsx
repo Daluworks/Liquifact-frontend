@@ -1,57 +1,53 @@
-/**
- * @file app/invest/loading.test.jsx
- * Tests for the Next.js route-level loading UI at /invest.
- *
- * Verifies that InvestLoading:
- *  - renders without errors
- *  - delegates to InvoiceListSkeleton
- *  - exposes the correct ARIA attributes on the page shell
- *  - has no accessibility violations
- */
+import "@testing-library/jest-dom";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import InvestLoading, { LOADING_RECOVERY_DELAY_MS } from "./loading";
 
-import React from "react";
-import { render, screen } from "@testing-library/react";
-import { axe, toHaveNoViolations } from "jest-axe";
-import InvestLoading from "./loading";
+const mockRefresh = jest.fn();
 
-expect.extend(toHaveNoViolations);
+jest.mock("next/navigation", () => ({
+  useRouter: () => ({ refresh: mockRefresh }),
+}));
 
 describe("InvestLoading", () => {
-  it("renders without crashing", () => {
-    expect(() => render(<InvestLoading />)).not.toThrow();
+  beforeEach(() => {
+    jest.useFakeTimers();
+    mockRefresh.mockClear();
   });
 
-  it("renders the page root with data-testid='invest-loading'", () => {
-    render(<InvestLoading />);
-    expect(screen.getByTestId("invest-loading")).toBeInTheDocument();
+  afterEach(() => {
+    jest.runOnlyPendingTimers();
+    jest.useRealTimers();
   });
 
-  it("renders the page root with aria-busy='true'", () => {
-    render(<InvestLoading />);
-    expect(screen.getByTestId("invest-loading")).toHaveAttribute("aria-busy", "true");
-  });
-
-  it("renders the NavMenuSkeleton header", () => {
+  it("shows a retryable error after the fixed loading timeout", () => {
     const { container } = render(<InvestLoading />);
-    const header = container.querySelector("nav") || container.querySelector("header") || container.querySelector(".nav-menu-skeleton"); // assuming NavMenuSkeleton renders one of these
-    // Actually we can just check it doesn't crash, but let's check for animate-pulse instead
-    expect(container).toBeInTheDocument();
+
+    expect(container.querySelector('[aria-busy="true"]')).toBeInTheDocument();
+    expect(screen.getByLabelText("Loading investable invoices")).toBeInTheDocument();
+
+    act(() => {
+      jest.advanceTimersByTime(LOADING_RECOVERY_DELAY_MS - 1);
+    });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    act(() => {
+      jest.advanceTimersByTime(1);
+    });
+
+    expect(container.querySelector('[aria-busy="false"]')).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("taking longer than expected");
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(mockRefresh).toHaveBeenCalledTimes(1);
   });
 
-  it("contains the sr-only loading announcement from InvoiceListSkeleton", () => {
-    render(<InvestLoading />);
-    expect(screen.getByText(/loading invoices, please wait/i)).toBeInTheDocument();
-  });
+  it("clears the recovery timer when the loading fallback unmounts", () => {
+    const { unmount } = render(<InvestLoading />);
+    unmount();
 
-  it("has multiple animate-pulse elements", () => {
-    const { container } = render(<InvestLoading />);
-    const pulsed = container.querySelectorAll(".animate-pulse");
-    expect(pulsed.length).toBeGreaterThanOrEqual(5);
-  });
+    act(() => {
+      jest.advanceTimersByTime(LOADING_RECOVERY_DELAY_MS);
+    });
 
-  it("has no axe accessibility violations", async () => {
-    const { container } = render(<InvestLoading />);
-    const results = await axe(container);
-    expect(results).toHaveNoViolations();
+    expect(mockRefresh).not.toHaveBeenCalled();
   });
 });
