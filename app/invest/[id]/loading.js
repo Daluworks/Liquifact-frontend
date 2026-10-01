@@ -50,27 +50,14 @@ function safeInvoiceListSkeleton(rows) {
 
 export default function InvestLoading() {
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100" aria-busy="true">
-      {/* NavMenuSkeleton has its own error boundary protection */}
+    <div className="min-h-screen bg-slate-950 text-slate-100" aria-busy="true" aria-live="polite" role="status">
       <NavMenuSkeleton />
-
-      <main className="max-w-4xl mx-auto px-6 py-12">
-        {/* Title skeleton - always renders with safe dimensions */}
+      <main className="max-w-4xl mx-auto px-6 py-12" aria-label="Loading investment details">
         <div className="h-7 w-24 rounded bg-slate-700 animate-pulse mb-2" />
         <div className="h-4 w-full max-w-xl rounded bg-slate-800 animate-pulse mb-2" />
         <div className="h-4 w-3/4 max-w-lg rounded bg-slate-800 animate-pulse mb-8" />
-
-        {/* Action buttons skeleton - validated array length */}
-        <div className="mb-8 rounded-xl border border-slate-800 bg-slate-900/30 p-6">
-          <div className="flex flex-wrap gap-4">
-            {safeSkeletonArray(4, 10).map((_, i) => (
-              <div key={i} className="h-10 w-32 rounded-lg bg-slate-800 animate-pulse" />
-            ))}
-          </div>
-        </div>
-
-        {/* Invoice list skeleton - validated row count */}
-        {safeInvoiceListSkeleton(3)}
+        <div className="mb-8 rounded-xl border border-slate-800 bg-slate-900/30 p-6"><div className="flex flex-wrap gap-4">{Array.from({ length: 4 }, (_, index) => <div key={index} className="h-10 w-32 rounded-lg bg-slate-800 animate-pulse" />)}</div></div>
+        <InvoiceListSkeleton rows={3} />
       </main>
     </div>
   );
