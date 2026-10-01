@@ -61,7 +61,7 @@
  * lock released, so retrying is safe and re-uses the same value.
  */
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import React, { Component, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 // ── Concurrency invariants (issue #1138) ─────────────────────────────────
 // EditableRow enforces four invariants for any `onSave` (sync or async):
 //
@@ -80,6 +80,7 @@ import DensityToggle from "@/components/DensityToggle";
 import { useDensity } from "@/lib/hooks/useDensity";
 import { getInvoiceFieldValidator } from "@/lib/validation/invoice";
 import { copy } from "@/app/copy/en";
+import { reportError } from "@/lib/observability/reportError";
 
 /**
  * Validation boundary for InvoiceDetailClient props.
@@ -284,7 +285,6 @@ function EditableRow({
   }, []);
 
   // Resolve the live validator: caller-supplied wins, otherwise fall back to
-  const inputRef = useRef(null);
   // the field-keyed validator from `lib/validation/invoice`. We freeze the
   // function reference in a useMemo so the useMemo below is a pure
   // function of (draft, isEditing) and won't churn on every render.
@@ -524,7 +524,38 @@ function EditableRow({
 // InvoiceDetailClient
 // ────────────────────────────────────────────────────────────────────────────
 
-export default function InvoiceDetailClient(props) {
+class InvoiceDetailClientErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    if (typeof reportError === "function") {
+      reportError(error, {
+        scope: "invest.invoice_detail_client",
+        ...errorInfo,
+      });
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <section className="p-6 bg-slate-900/50 border border-slate-800 rounded-lg">
+          <p className="text-sm text-slate-400">Metadata is temporarily unavailable.</p>
+        </section>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function InvoiceDetailClientInner(props) {
   // Validate all props at component entry to ensure type safety and provide fallbacks
   const validatedProps = useMemo(() => validateInvoiceDetailClientProps(props), [props]);
 
@@ -654,5 +685,13 @@ export default function InvoiceDetailClient(props) {
         {announcement}
       </p>
     </section>
+  );
+}
+
+export default function InvoiceDetailClient(props) {
+  return (
+    <InvoiceDetailClientErrorBoundary>
+      <InvoiceDetailClientInner {...props} />
+    </InvoiceDetailClientErrorBoundary>
   );
 }
