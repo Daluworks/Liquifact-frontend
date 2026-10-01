@@ -172,13 +172,15 @@ export default function FundActions({ id, status, maxAmount, currency, yieldValu
    * update) while forwarding the idempotency key.
    */
   const wrappedPerformFund = useCallback(
-    async (invoiceId, amount, idempotencyKey) => {
+    async (invoiceId, amount, idempotencyKey, signal) => {
       const action =
         performFund ??
         (async (_id, _amount, _key) => {
           // No-op placeholder — replace with real Stellar sign+submit flow.
         });
-      return fundInvoice(invoiceId, amount, (invId, amt) => action(invId, amt, idempotencyKey));
+      return fundInvoice(invoiceId, amount, (invId, amt) =>
+        action(invId, amt, idempotencyKey, signal)
+      );
     },
     [performFund, fundInvoice]
   );
@@ -193,6 +195,7 @@ export default function FundActions({ id, status, maxAmount, currency, yieldValu
   } = useFundingSubmit({
     invoiceId: id,
     walletAddress: walletData?.address ?? null,
+    maxAmount,
     performFund: wrappedPerformFund,
   });
 
@@ -263,7 +266,7 @@ export default function FundActions({ id, status, maxAmount, currency, yieldValu
    * - If the wallet is disconnected, prompt connection and return early.
    * - Delegates to `useFundingSubmit` which manages:
    *     • In-memory double-submit guard (blocks re-entrant calls within same lifecycle)
-   *     • Session-persisted idempotency key (survives remounts; same key on retry)
+  *     • Shared persisted idempotency key (survives remounts and tabs; same key on retry)
    *     • BroadcastChannel cross-tab lock (blocks a second tab from submitting)
    *     • AbortController lifecycle (cancels pending request on unmount)
    * - Toast and live-region announcements are classified by error type so the
@@ -281,7 +284,8 @@ export default function FundActions({ id, status, maxAmount, currency, yieldValu
       const cur = currency ?? "";
 
       try {
-        await fundingSubmit(amount);
+        const submitted = await fundingSubmit(amount);
+        if (!submitted) return;
 
         // fundingSubmit resolves on success (no throw).
         const successMsg = fundingCopy.successMsg

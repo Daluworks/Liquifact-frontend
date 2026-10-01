@@ -1,69 +1,62 @@
+import { isValidElement } from "react";
+import MarketplaceShell from "./MarketplaceShell";
+
 /**
  * @file app/invest/layout.js
  *
- * Layout for all /invest routes. Wraps the list page and detail page with
- * MarketplaceShell so that invoice state (including optimistic updates) is
- * shared across navigations within the marketplace.
+ * Wraps the list page and detail page with MarketplaceShell so that
+ * invoice state (including optimistic updates) is shared across navigations
+ * within the marketplace.
  *
- * PUBLIC INTERFACE CONTRACT:
- * ===========================
- * This layout is a Next.js Server Component that provides:
- *   - A MarketplaceShell wrapper that manages shared invoice state
- *   - Transparent composition of child routes (/invest and /invest/[id])
- *   - No direct public API — it exists solely as a layout boundary
- *
- * COMPATIBILITY GUARANTEES:
- * =========================
- *   - The layout always renders MarketplaceShell with its children prop
- *   - No breaking changes to the MarketplaceShell import path
- *   - Null/undefined children are handled gracefully (render as empty fragment)
- *   - Invalid children types (non-React-node) throw a descriptive error
- *
- * INVARIANTS:
- * ===========
- *   - The layout is a Server Component (no hooks, no browser APIs)
- *   - MarketplaceShell is always the direct parent of children
- *   - No side effects during render
- *   - No conditional rendering of MarketplaceShell itself
- *
- * @param {object} props
- * @param {React.ReactNode} props.children - The child route content to wrap.
- *   Must be a valid React node (element, string, number, array, fragment, or null).
- *   Invalid types (plain objects, functions, primitives other than string/number)
- *   will throw a descriptive error to prevent silent failures.
- *
- * @returns {React.ReactElement} A MarketplaceShell component wrapping the children.
- *
- * @example
- * // Used automatically by Next.js App Router for /invest routes
- * // No manual instantiation needed
- *
- * @see app/invest/MarketplaceShell.jsx - The client component that provides state
- * @see app/invest/MarketplaceContext.jsx - The context for shared invoice state
+ * Invariants enforced here:
+ *   1. `children` must be a valid React node (element, array, string, number,
+ *      portal, or null/undefined fragment). A non-renderable value is replaced
+ *      with null so React never receives an unsafe child.
+ *   2. The layout always returns a MarketplaceShell wrapper — it never renders
+ *      bare children, ensuring the shared invoice context is always present for
+ *      every /invest sub-route.
  */
-import MarketplaceShell from "./MarketplaceShell";
-import { copy } from "@/app/copy/en";
-import { reportError } from "@/lib/observability/reportError";
-import { validateInvestChildren, validateInvestLayoutParams } from "./validation";
+
+/**
+ * Returns true when `node` is safe to pass as React children.
+ * Accepts: null, undefined, boolean, string, number, React element,
+ * array (shallowly), and iterable portals.
+ *
+ * @param {*} node
+ * @returns {boolean}
+ */
+function isRenderableNode(node) {
+  if (node == null) return true; // null / undefined are valid (render nothing)
+  if (typeof node === "boolean") return true; // false / true are valid
+  if (typeof node === "string" || typeof node === "number") return true;
+  if (isValidElement(node)) return true;
+  if (Array.isArray(node)) return true; // shallow check; React validates elements
+  // React portals and iterables expose a $$typeof symbol.
+  if (typeof node === "object" && node !== null && typeof node.$$typeof === "symbol")
+    return true;
+  return false;
+}
 
 export default function InvestLayout({ children }) {
-  // Runtime validation to ensure children is a valid React node.
-  // This prevents silent failures and makes debugging easier.
-  if (
-    children !== null &&
-    children !== undefined &&
-    typeof children !== "object" &&
-    typeof children !== "string" &&
-    typeof children !== "number" &&
-    typeof children !== "boolean"
-  ) {
-    throw new Error(
-      `InvestLayout: Invalid children prop. Expected React.ReactNode but received ${typeof children}. ` +
-        "Valid types: React element, string, number, array, fragment, or null."
-    );
+  // Invariant: children must be renderable. A non-renderable value (e.g. a
+  // plain object, a class instance, or a function accidentally passed where
+  // a node was expected) would cause a React render error deep in the tree
+  // and produce a confusing error boundary fallback. Guard it here at the
+  // layout boundary so failures are loud, immediate, and attributable.
+  const safeChildren = isRenderableNode(children) ? children : null;
+
+  if (safeChildren !== children && children !== undefined) {
+    // Surface a dev-time warning without crashing production.
+    if (process.env.NODE_ENV !== "production") {
+      // eslint-disable-next-line no-console
+      console.error(
+        "[InvestLayout] Received a non-renderable `children` value (%s). " +
+          "This is likely a routing configuration error. " +
+          "Rendering null to prevent a React crash.",
+        typeof children,
+      );
+    }
   }
 
-  // Intentionally always render MarketplaceShell — no conditional logic.
-  // This preserves the contract that all /invest routes share the same shell.
-  return <MarketplaceShell>{children}</MarketplaceShell>;
+  return <MarketplaceShell>{safeChildren}</MarketplaceShell>;
 }

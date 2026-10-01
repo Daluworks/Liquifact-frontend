@@ -81,6 +81,10 @@ import { TRUSTED_WALLET_INSTALL_URL } from "./constants";
  * @property {string} invest.detail.actionGroupLabel
  * @property {string} invest.detail.labelReference
  * @property {string} invest.detail.exportGroupLabel
+ * @property {string} invest.detail.notFoundStatusLabel
+ * @property {string} invest.detail.notFoundHeading
+ * @property {string} invest.detail.notFoundDescription
+ * @property {string} invest.detail.notFoundMarketplaceLabel
  * @property {string} invest.detail.exportCSVButton
  * @property {string} invest.detail.exportCSVLabel
  * @property {string} invest.detail.exportJSONButton
@@ -253,6 +257,7 @@ import { TRUSTED_WALLET_INSTALL_URL } from "./constants";
  * @property {string} globalError.heading
  * @property {string} globalError.description
  * @property {string} globalError.reloadLabel
+ * @property {string} globalError.resettingLabel
  * @property {string} globalError.homeLabel
  * @property {Object} invoiceTimeline - Invoice lifecycle timeline copy
  * @property {string} invoiceTimeline.heading
@@ -264,17 +269,73 @@ import { TRUSTED_WALLET_INSTALL_URL } from "./constants";
  * @property {string} invoiceTimeline.statusCompleted
  * @property {string} invoiceTimeline.statusCurrent
  * @property {string} invoiceTimeline.statusPending
- * @property {Object} setting
-*/
-
-/**
- * Recursively freeze application copy so all module consumers observe the same
- * read-only dictionary across SSR requests, retries, and concurrent tests.
- *
- * @template T
- * @param {T} value
- * @param {WeakSet<object>} [seen]
- * @returns {T}
+ * @property {Object} settings - Settings page copy
+ * @property {string} settings.pageTitle
+ * @property {string} settings.pageSub
+ * @property {string} settings.editAction
+ * @property {string} settings.editActionLabel
+ * @property {string} settings.saveAction
+ * @property {string} settings.saveActionLabel
+ * @property {string} settings.cancelAction
+ * @property {string} settings.cancelActionLabel
+ * @property {string} settings.emptyValue
+ * @property {string} settings.savedAnnouncement
+ * @property {string} settings.cancelledAnnouncement
+ * @property {string} settings.invalidAnnouncement
+ * @property {Object} settings.fields - Field-level copy
+ * @property {string} settings.fields.displayName.label
+ * @property {string} settings.fields.displayName.description
+ * @property {string} settings.fields.displayName.placeholder
+ * @property {string} settings.fields.email.label
+ * @property {string} settings.fields.email.description
+ * @property {string} settings.fields.email.placeholder
+ * @property {Object} settings.errors - Validation error messages
+ * @property {string} settings.errors.required
+ * @property {string} settings.errors.displayNameTooShort
+ * @property {string} settings.errors.displayNameTooLong
+ * @property {string} settings.errors.emailTooLong
+ * @property {string} settings.errors.invalidEmail
+ * @property {string} settings.copyIdentifier
+ * @property {string} settings.toastCopySuccessMsg
+ * @property {string} settings.toastCopySuccessTitle
+ * @property {string} settings.toastCopyErrorMsg
+ * @property {string} settings.toastCopyErrorTitle
+ * @property {string} settings.errorStatus
+ * @property {string} settings.loadStatus
+ * @property {string} settings.showStatus
+ * @property {string} settings.noMatch
+ * @property {string} settings.empty
+ * @property {string} settings.loadMore
+ * @property {string} settings.densityLabel
+ * @property {string} settings.densityDescription
+ * @property {string} settings.exportGroupLabel
+ * @property {string} settings.exportCSVLabel
+ * @property {string} settings.exportJSONLabel
+ * @property {string} settings.exportAnnounceCSV
+ * @property {string} settings.exportAnnounceJSON
+ * @property {string} settings.exportEmpty
+ * @property {Object} investDetail - Invoice detail page copy (used by InvoiceDetailItems.jsx)
+ * @property {string} investDetail.heading
+ * @property {string} investDetail.subtitle
+ * @property {string} investDetail.dtIssuer
+ * @property {string} investDetail.dtAmount
+ * @property {string} investDetail.dtYield
+ * @property {string} investDetail.dtMaturity
+ * @property {string} investDetail.dtStatus
+ * @property {string} investDetail.fundButton
+ * @property {string} investDetail.fundButtonAriaLabel
+ * @property {string} investDetail.copyLinkButton
+ * @property {string} investDetail.copyLinkAriaLabel
+ * @property {string} investDetail.printButton
+ * @property {string} investDetail.printAriaLabel
+ * @property {string} investDetail.disclaimer
+ * @property {string} investDetail.loadErrorTitle
+ * @property {string} investDetail.loadErrorDescription
+ * @property {string} investDetail.backToMarketplace
+ * @property {string} investDetail.toastCopySuccess
+ * @property {string} investDetail.toastCopySuccessTitle
+ * @property {string} investDetail.toastCopyError
+ * @property {string} investDetail.toastCopyErrorTitle
  */
 function deepFreeze(value, seen = new WeakSet()) {
   if (value === null || typeof value !== "object") {
@@ -492,7 +553,20 @@ export const copy = deepFreeze({
         errorRequired: "{field} is required.",
         announceSaved: "{field} updated successfully.",
         announceCancelled: "Edit cancelled.",
+        savingButton: "Saving…",
+        announceNoChange: "{field} already matches the saved value.",
+        announceSaveFailed: "{field} could not be saved: {error}",
+        announceStale: "{field} was updated elsewhere. Showing the latest value.",
       },
+      // Strings used when the route parameter id fails validation.
+      // These appear in server logs and observability tooling, not in the
+      // rendered UI (the user sees the not-found page instead).
+      invalidIdLogPrefix: "Invalid invoice id rejected at route boundary:",
+      invalidIdTooLong: "Invoice id exceeds maximum allowed length.",
+      invalidIdIllegalChars:
+        "Invoice id contains characters outside the allowed set (a-z, A-Z, 0-9, -).",
+      invalidIdEmpty: "Invoice id is empty.",
+      invalidIdNotString: "Invoice id is not a string.",
       bulk: {
         sectionHeading: "Invoice documents",
         sectionSub: "Select documents to export or remove from this invoice.",
@@ -507,9 +581,11 @@ export const copy = deepFreeze({
         exportButtonAria: "Export selected documents as a JSON download",
         deleteButton: "Delete",
         deleteButtonAria: "Delete {count} selected documents after confirmation",
-        exportSuccessTitle: "Export ready",
-        exportSuccessMsg: "Exported {count} document{plural}.",
-        exportEmptyMsg: "No documents selected to export.",
+      exportSuccessTitle: "Export ready",
+      exportSuccessMsg: "Exported {count} document{plural}.",
+      exportEmptyMsg: "No documents selected to export.",
+      exportErrorTitle: "Export failed",
+      exportErrorMsg: "Could not export the selected documents. Please try again.",
         deleteConfirmTitle: "Delete selected documents?",
         deleteConfirmBody:
           "You are about to permanently delete {count} document{plural} from this invoice. This cannot be undone.",
@@ -772,6 +848,7 @@ export const copy = deepFreeze({
     heading: "Critical error",
     description: "A layout-level error occurred. Please reload the page or return home.",
     reloadLabel: "Reload page",
+    resettingLabel: "Reloading\u2026",
     homeLabel: "\u2190 Back to LiquiFact",
   },
   invoiceTimeline: {
@@ -793,6 +870,30 @@ export const copy = deepFreeze({
     errorDescription: "We could not load the timeline for this invoice right now.",
     retryLabel: "Retry",
     byActor: "By {actor}",
+  },
+  investDetail: {
+    heading: "Invoice details",
+    subtitle: "Review the invoice terms before funding.",
+    dtIssuer: "Issuer",
+    dtAmount: "Amount",
+    dtYield: "Estimated yield",
+    dtMaturity: "Maturity date",
+    dtStatus: "Status",
+    fundButton: "Fund this invoice",
+    fundButtonAriaLabel: "Fund this invoice",
+    copyLinkButton: "Copy link",
+    copyLinkAriaLabel: "Copy invoice link to clipboard",
+    printButton: "Print / Save PDF",
+    printAriaLabel: "Print or save this invoice as PDF",
+    disclaimer:
+      "Note: Yield references are educational only and reflect on-chain basis-point assumptions. Invoice contracts settle at maturity. Funding commits principal and is subject to wallet approval.",
+    loadErrorTitle: "Unable to load invoice details",
+    loadErrorDescription: "Unable to load invoice details right now.",
+    backToMarketplace: "\u2190 Back to marketplace",
+    toastCopySuccess: "Invoice link copied to clipboard.",
+    toastCopySuccessTitle: "Link copied",
+    toastCopyError: "Could not copy link to clipboard.",
+    toastCopyErrorTitle: "Copy failed",
   },
 };
 /**
