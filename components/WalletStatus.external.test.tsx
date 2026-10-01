@@ -38,17 +38,14 @@ function renderWithProviders() {
 describe("WalletStatus external navigation", () => {
   let openSpy: jest.SpyInstance;
   let errorSpy: jest.SpyInstance;
-  let originalUrl: string;
 
   beforeEach(() => {
     jest.useFakeTimers();
     openSpy = jest.spyOn(window, "open").mockImplementation();
     errorSpy = jest.spyOn(console, "error").mockImplementation();
-    originalUrl = copy.wallet.installWalletUrl;
   });
 
   afterEach(() => {
-    copy.wallet.installWalletUrl = originalUrl;
     jest.useRealTimers();
     jest.restoreAllMocks();
   });
@@ -90,9 +87,12 @@ describe("WalletStatus external navigation", () => {
     copy.wallet.installWalletUrl = url;
     await connectToReachNoWalletState();
 
-    const installButton = screen.getByRole("button", { name: /install/i });
-    fireEvent.click(installButton);
+  it("blocks an insecure URL and logs non-sensitive diagnostics", () => {
+    const result = openTrustedWalletInstallUrl(
+      "http://insecure-wallet-site.com/path?token=secret"
+    );
 
+    expect(result).toBe(false);
     expect(openSpy).not.toHaveBeenCalled();
     expect(errorSpy).toHaveBeenCalledWith("Blocked attempt to open an untrusted wallet URL.");
   });
