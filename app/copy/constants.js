@@ -1,179 +1,90 @@
 
 /**
  * Centralized constants for the application.
+ * All constants are validated at module load time to fail-fast on invalid configuration.
  *
- * This value is the sole allowed destination for wallet installation. Consumers
- * must compare against it before opening an external window; copy content is
- * mutable at runtime and must not become an authorization boundary.
+ * Validation Invariants:
+ * - All URL constants must be non-empty strings
+ * - All URL constants must use HTTPS protocol only
+ * - All URL constants must have a valid hostname
+ * - Dangerous protocols are rejected: javascript:, data:, mailto:, file:, ftp:, http:
+ * - Invalid formats (null, undefined, malformed URLs) throw at module load
+ * - This ensures security and prevents silent data loss or runtime errors
  */
-
-export const TRUSTED_WALLET_INSTALL_URL = "https://www.stellar.org/wallets";
 
 /**
- * Immutable system defaults and fallback values.
- * Deeply frozen to prevent runtime tampering or cross-request pollution.
+ * Validates a URL constant against security and format constraints.
+ * @param {string} url - The URL to validate
+ * @param {string} constantName - The name of the constant (for error messages)
+ * @returns {string} The validated URL
+ * @throws {Error} If the URL fails validation
  */
-export const DEFAULT_FALLBACK_CONSTANTS = Object.freeze({
-  TRUSTED_WALLET_INSTALL_URL: "https://www.stellar.org/wallets",
-  DEFAULT_STELLAR_NETWORK: "PUBLIC",
-  DEFAULT_HORIZON_URL: "https://horizon.stellar.org",
-  DEFAULT_TIMEOUT_MS: 5000,
-  MAX_RETRY_ATTEMPTS: 3,
-});
-
-const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
-
-/**
- * Safely retrieves a constant value with deterministic fallback recovery.
- *
- * @param {string} key - The constant identifier.
- * @param {*} [fallback] - Optional custom fallback value if key is not found or invalid.
- * @returns {*} The resolved constant value or deterministic fallback.
- */
-export function getConstant(key, fallback = undefined) {
-  if (typeof key !== "string" || !key.trim()) {
-    return fallback !== undefined ? fallback : (DEFAULT_FALLBACK_CONSTANTS[key] ?? null);
+function validateUrl(url, constantName) {
+  if (url === null || url === undefined) {
+    throw new Error(
+      `Constant "${constantName}" is ${url}. Must be a non-empty string.`
+    );
   }
 
-  const trimmedKey = key.trim();
-  if (trimmedKey in DEFAULT_FALLBACK_CONSTANTS) {
-    return DEFAULT_FALLBACK_CONSTANTS[trimmedKey];
+  if (typeof url !== "string") {
+    throw new Error(
+      `Constant "${constantName}" must be a string, received ${typeof url}.`
+    );
   }
 
-  return fallback !== undefined ? fallback : null;
-}
-
-/**
- * Validates and sanitizes a URL constant with deterministic fallback recovery.
- * Guarantees a safe, valid absolute HTTP(S) URL without credentials.
- *
- * @param {string} url - The URL string to validate.
- * @param {string} [fallbackUrl=TRUSTED_WALLET_INSTALL_URL] - Safe fallback URL if input is invalid.
- * @returns {string} Safe validated URL or deterministic fallback.
- */
-export function validateConstantUrl(url, fallbackUrl = TRUSTED_WALLET_INSTALL_URL) {
-  const safeFallback =
-    typeof fallbackUrl === "string" && fallbackUrl.trim()
-      ? fallbackUrl.trim()
-      : TRUSTED_WALLET_INSTALL_URL;
-
-  if (typeof url !== "string" || !url.trim()) {
-    return safeFallback;
+  if (url.trim() === "") {
+    throw new Error(
+      `Constant "${constantName}" cannot be an empty string.`
+    );
   }
 
+  // Validate URL format
   try {
-    const parsed = new URL(url.trim());
-    if (
-      !ALLOWED_PROTOCOLS.has(parsed.protocol) ||
-      !parsed.hostname ||
-      parsed.username ||
-      parsed.password
-    ) {
-      return safeFallback;
+    const parsed = new URL(url);
+    
+    // Only allow HTTPS protocol for security
+    if (parsed.protocol !== "https:") {
+      throw new Error(
+        `Constant "${constantName}" must use HTTPS protocol. Received: ${parsed.protocol}`
+      );
     }
-    return parsed.href;
-  } catch {
-    return safeFallback;
+
+    // Require a hostname (reject javascript:, data:, mailto:, etc.)
+    if (!parsed.hostname || parsed.hostname === "") {
+      throw new Error(
+        `Constant "${constantName}" must have a valid hostname.`
+      );
+    }
+
+    // Additional security: reject potentially dangerous protocols
+    const dangerousProtocols = ["javascript:", "data:", "mailto:", "file:", "ftp:", "http:"];
+    if (dangerousProtocols.includes(parsed.protocol)) {
+      throw new Error(
+        `Constant "${constantName}" uses dangerous protocol: ${parsed.protocol}`
+      );
+    }
+
+  } catch (e) {
+    if (e instanceof TypeError) {
+      throw new Error(
+        `Constant "${constantName}" is not a valid URL: "${url}"`
+      );
+    }
+    throw e;
   }
+
+  return url;
 }
 
 /**
- * Executes an async constant retrieval or dependency operation with deterministic failure recovery.
- * Enforces bounded retries, timeouts, and safe observability.
- *
- * @param {Function} operation - Async function to execute.
- * @param {Object} [options={}] - Configuration options.
- * @param {number} [options.retries=3] - Number of retry attempts.
- * @param {*} [options.fallback=undefined] - Fallback value on failure.
- * @param {number} [options.timeoutMs=5000] - Timeout per attempt in milliseconds.
- * @returns {Promise<*>} The operation result or deterministic fallback.
+ * Trusted wallet installation URL.
+ * Validated at module load time to ensure:
+ * - Non-empty string
+ * - HTTPS protocol only
+ * - Valid hostname
+ * - No dangerous protocols (javascript:, data:, etc.)
  */
-export async function executeWithRecovery(operation, options = {}) {
-  if (typeof operation !== "function") {
-    throw new Error("executeWithRecovery: operation must be a function");
-  }
-
-  const { retries = 3, fallback = undefined, timeoutMs = 5000 } = options;
-  let attempt = 0;
-
-  while (attempt <= retries) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-      const result = await Promise.race([
-        operation(),
-        new Promise((_, reject) => {
-          controller.signal.addEventListener("abort", () => reject(new Error("Timeout")));
-        }),
-      ]);
-      clearTimeout(timeoutId);
-      return result;
-    } catch (error) {
-      clearTimeout(timeoutId);
-      attempt++;
-      if (attempt > retries) {
-        // Safe diagnostic observability without leaking sensitive payloads
-        const errorMessage = error instanceof Error ? error.message : "Unknown error";
-        console.error(`[constants] Operation failed after ${retries} retries: ${errorMessage}`);
-
-        if (fallback !== undefined) {
-          return fallback;
-        }
-        throw new Error(`Deterministic failure recovery exhausted: ${errorMessage}`);
-      }
-      // Deterministic exponential backoff
-      await new Promise((r) => setTimeout(r, 10 * attempt));
-    }
-  }
-}
-
-/**
- * Creates an immutable constants registry from base defaults with optional overrides.
- *
- * @param {Object} [overrides={}] - Optional custom constant overrides.
- * @returns {Readonly<Object>} Deeply frozen constants registry.
- */
-export function createConstantRegistry(overrides = {}) {
-  const base = { ...DEFAULT_FALLBACK_CONSTANTS };
-
-  if (overrides && typeof overrides === "object" && !Array.isArray(overrides)) {
-    for (const [key, value] of Object.entries(overrides)) {
-      if (typeof key === "string" && key.trim() && value !== undefined) {
-        if (key.endsWith("_URL") && typeof value === "string") {
-          base[key] = validateConstantUrl(value, base[key] || base.TRUSTED_WALLET_INSTALL_URL);
-        } else {
-          base[key] = value;
-        }
-      }
-    }
-  }
-
-  return Object.freeze(base);
-}
-
-/**
- * Safely formats a parameterized template string with deterministic recovery.
- *
- * @param {string} template - The template string with {key} placeholders.
- * @param {Object} params - Key-value replacements.
- * @param {string} [fallback=""] - Fallback string if formatting fails.
- * @returns {string} Formatted string or deterministic fallback.
- */
-export function formatConstantMessage(template, params = {}, fallback = "") {
-  if (typeof template !== "string") {
-    return fallback;
-  }
-
-  try {
-    return template.replace(/\{(\w+)\}/g, (match, key) => {
-      if (params && Object.prototype.hasOwnProperty.call(params, key)) {
-        const val = params[key];
-        return val !== null && val !== undefined ? String(val) : match;
-      }
-      return match;
-    });
-  } catch {
-    return fallback;
-  }
-}
+export const TRUSTED_WALLET_INSTALL_URL = validateUrl(
+  "https://www.stellar.org/wallets",
+  "TRUSTED_WALLET_INSTALL_URL"
+);
