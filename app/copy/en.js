@@ -554,6 +554,15 @@ export const copy = deepFreeze({
         announceSaveFailed: "{field} could not be saved: {error}",
         announceStale: "{field} was updated elsewhere. Showing the latest value.",
       },
+      // Strings used when the route parameter id fails validation.
+      // These appear in server logs and observability tooling, not in the
+      // rendered UI (the user sees the not-found page instead).
+      invalidIdLogPrefix: "Invalid invoice id rejected at route boundary:",
+      invalidIdTooLong: "Invoice id exceeds maximum allowed length.",
+      invalidIdIllegalChars:
+        "Invoice id contains characters outside the allowed set (a-z, A-Z, 0-9, -).",
+      invalidIdEmpty: "Invoice id is empty.",
+      invalidIdNotString: "Invoice id is not a string.",
       bulk: {
         sectionHeading: "Invoice documents",
         sectionSub: "Select documents to export or remove from this invoice.",
